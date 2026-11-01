@@ -11,13 +11,13 @@ POST `/alert` with `Content-Type: application/json` and exactly `{"incident":"<l
 
 The replay window defaults to ±300 seconds, inclusive, set by `REPLAY_WINDOW_S`. The receiver accepts one secret or two separated by exactly one space. To rotate, install both on the receiver, switch the gateway to the new single secret, then remove the old receiver secret after the replay window and outstanding gateway retries.
 
-WebCrypto verifies the HMAC before JSON parsing. Authentication failures return 401 `{"error":"unauthorized"}`. Missing, empty, or malformed shared-secret configuration returns 503 `{"error":"unavailable"}` on every route, including `/health`.
+WebCrypto verifies the HMAC before JSON parsing. Authentication failures return 401 `{"error":"unauthorized"}`. Missing, empty, or malformed shared-secret configuration returns 503 `{"error":"unavailable"}` on every route; GET `/health` returns 503 `{"error":"unavailable","drill_mode":<bool>}`.
 
 Netops implemented signing and five delivery attempts with 1, 2, 4, and 8 second retry backoffs inside `waitUntil`, plus an `alert_gave_up` log, in Belweave/infer-gateway PR #1 at `49aadcd`. Netops cross-checked the gateway's real sender against this receiver's `authenticated()`. Receiver retries only start after durable acceptance; they cannot recover a gateway request that never arrived.
 
 ## Behaviour
 
-Bodies are limited to 256 bytes, checked against both Content-Length and the stream. Invalid JSON or incident fields return 400; oversized bodies return 413; non-JSON content types return 415. Only POST `/alert` is accepted (other methods: 405; unknown paths: 404). GET `/health` returns `{"ok":true}` when configured.
+Bodies are limited to 256 bytes, checked against both Content-Length and the stream. Invalid JSON or incident fields return 400; oversized bodies return 413; non-JSON content types return 415. Only POST `/alert` is accepted (other methods: 405; unknown paths: 404). GET `/health` returns `{"ok":true,"drill_mode":false}` when configured, or `{"ok":true,"drill_mode":true}` in drill mode. `drill_mode` uses the same rule as sending: true only when `DRILL_MODE` is exactly `"1"`. The body has no other fields and never includes secrets or the webhook URL.
 
 One `AlertLedger` Durable Object per incident stores pending work before trying Notify immediately. A new incident returns 202 with `sent` or `queued`; a duplicate returns 200 with its current `pending`, `sent`, or `failed` status without sending again. Ledger entries are retained for deduplication. Stored `first_seen` and `notified_at` timestamps are Unix milliseconds.
 
@@ -35,13 +35,13 @@ Drill mode is on only when `DRILL_MODE` is exactly the string `"1"`. Unset and a
 
 The ledger decides the mode once when it first accepts an incident and stores `drill: true` only for drill incidents. Production records have no `drill` field. Every attempt uses that stored flag, so retries send identical payload bytes and headers after a restart or a change to `DRILL_MODE`.
 
-Drill notifications prefix `title`, `summary`, and `body` with exactly `"DRILL, not a real incident. "`, including the trailing space, followed by the existing production text. The summary is prefixed because it can be what shows on the lock screen. `project` and the JSON field set and order stay unchanged. The Idempotency-Key is `b300-safety-drill-<incident>` instead of the production key `b300-safety-<incident>`. At acceptance, the receiver logs `{"event":"drill_mode","incident":"<incident>","drill":true}` exactly once with `console.log`, without the webhook URL or token. Retries and duplicate POSTs add no drill log line, and duplicates send nothing. Production logs are unchanged.
+Drill notifications prefix `title`, `summary`, and `body` with exactly `"DRILL, not a real incident. "`, including the trailing space, followed by the existing production text. The summary is prefixed because it can be what shows on the lock screen. `project` and the JSON field set and order stay unchanged. The Idempotency-Key is `b300-safety-drill-<incident>` instead of the production key `b300-safety-<incident>`. At acceptance, the receiver logs `{"event":"drill_mode","incident":"<incident>","drill":true}` exactly once with `console.log`, without the webhook URL or token. Retries and duplicate POSTs add no drill log line, and duplicates send nothing. Production logs are unchanged. Netops can check the live mode with GET `/health`: confirm `"drill_mode":true` before the drill and `"drill_mode":false` before any production deploy.
 
 ## Notify webhook
 
 `NOTIFY_ALERT_WEBHOOK_URL` is the Notify webhook service URL for service "B300 CSAM alert". The receiver posts JSON to `/hooks/:token` with only `Content-Type` and `Idempotency-Key` headers. The URL token is the credential; there is no Authorization header.
 
-Treat the URL as a secret: it is never logged, returned, or stored in ledger records. If it leaks, rotate it with Notify's service rotate, then update the receiver secret. The URL must parse, use HTTPS, and contain no username or password. Missing, empty, or invalid configuration returns 503 `{"error":"unavailable"}` on every route before touching the ledger and logs `{"event":"rejected","reason":"notify_unconfigured"}` at error level. If configuration disappears after acceptance, pending work remains on the alarm retry path.
+Treat the URL as a secret: it is never logged, returned, or stored in ledger records. If it leaks, rotate it with Notify's service rotate, then update the receiver secret. The URL must parse, use HTTPS, and contain no username or password. Missing, empty, or invalid configuration returns 503 `{"error":"unavailable"}` on every route (GET `/health` adds only `drill_mode`) before touching the ledger and logs `{"event":"rejected","reason":"notify_unconfigured"}` at error level. If configuration disappears after acceptance, pending work remains on the alarm retry path.
 
 ## Local tests and signing helper
 

@@ -421,8 +421,41 @@ test("requires JSON content type, permits charset, and checks method and path", 
   }
   const health = await h.post(undefined, { method: "GET", url: "https://receiver.invalid/health" });
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true });
+  assert.equal(await health.text(), '{"ok":true,"drill_mode":false}');
 });
+
+for (const [mode, drill] of [["1", true], [undefined, false], ["0", false], ["true", false],
+  [" 1", false], ["1 ", false], ["", false], [1, false], [true, false]]) {
+  test(`GET /health reports drill_mode ${drill} for DRILL_MODE ${JSON.stringify(mode)}`, async (t) => {
+    const h = harness(t, mode === undefined ? {} : { DRILL_MODE: mode });
+    const health = await h.post(undefined, { method: "GET", url: "https://receiver.invalid/health" });
+    assert.equal(health.status, 200);
+    const body = await health.text();
+    assert.equal(body, JSON.stringify({ ok: true, drill_mode: drill }));
+    assert.deepEqual(Object.keys(JSON.parse(body)), ["ok", "drill_mode"]);
+    for (const forbidden of [WEBHOOK_URL, "test-hook-token", SECRET]) assert.equal(body.includes(forbidden), false);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.objects.size, 0);
+    assert.deepEqual(logs, []);
+  });
+}
+
+for (const [name, overrides] of [["unset webhook URL", { NOTIFY_ALERT_WEBHOOK_URL: undefined }],
+  ["missing secret", { NOTIFY_WEBHOOK_SECRET: undefined }]]) {
+  for (const [mode, drill] of [["1", true], [undefined, false], ["0", false], ["true", false]]) {
+    test(`${name} keeps GET /health at 503 with drill_mode ${drill} for DRILL_MODE ${JSON.stringify(mode)}`, async (t) => {
+      const h = harness(t, { ...overrides, ...(mode === undefined ? {} : { DRILL_MODE: mode }) });
+      const health = await h.post(undefined, { method: "GET", url: "https://receiver.invalid/health" });
+      assert.equal(health.status, 503);
+      assert.equal(await health.text(), JSON.stringify({ error: "unavailable", drill_mode: drill }));
+      const other = await h.post(undefined, { url: "https://receiver.invalid/health" });
+      assert.equal(other.status, 503);
+      assert.equal(await other.text(), '{"error":"unavailable"}');
+      assert.equal(h.calls.length, 0);
+      assert.equal(h.objects.size, 0);
+    });
+  }
+}
 
 for (const [name, secret] of [
   ["missing", undefined], ["empty", ""], ["whitespace", " "],
@@ -431,10 +464,12 @@ for (const [name, secret] of [
 ]) {
   test(`${name} secret config fails closed on every route`, async (t) => {
     const h = harness(t, { NOTIFY_WEBHOOK_SECRET: secret });
-    for (const options of [{}, { method: "GET" },
-      { url: "https://receiver.invalid/unknown" }, { method: "GET", url: "https://receiver.invalid/health" }]) {
+    for (const options of [{}, { method: "GET" }, { url: "https://receiver.invalid/unknown" }]) {
       await expectError(await h.post(undefined, options), 503, "unavailable");
     }
+    const health = await h.post(undefined, { method: "GET", url: "https://receiver.invalid/health" });
+    assert.equal(health.status, 503);
+    assert.equal(await health.text(), '{"error":"unavailable","drill_mode":false}');
     assert.equal(h.calls.length, 0);
   });
 }
@@ -457,7 +492,8 @@ for (const [name, url] of [
       const response = await h.post(undefined, options);
       assert.equal(response.status, 503);
       const body = await response.text();
-      assert.equal(body, '{"error":"unavailable"}');
+      assert.equal(body, options.method === "GET" && options.url?.endsWith("/health")
+        ? '{"error":"unavailable","drill_mode":false}' : '{"error":"unavailable"}');
       responses.push(body);
     }
     assert.equal(h.calls.length, 0);

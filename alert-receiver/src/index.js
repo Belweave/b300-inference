@@ -4,12 +4,13 @@ const BODY_LIMIT = 256;
 const TIMEOUT_MS = 10_000;
 const validIncident = (value) => typeof value === "string" && value.length === 36 && INCIDENT.test(value);
 
+const drillMode = (env) => env.DRILL_MODE === "1";
 const now = (env) => (env.NOW ? env.NOW() : Date.now());
 const json = (body, status = 200, headers = {}) => Response.json(body, { status, headers });
 
-function rejected(status, error, reason = error) {
+function rejected(status, error, reason = error, extra = {}) {
   console.error(JSON.stringify({ event: "rejected", reason }));
-  return json({ error }, status);
+  return json({ error, ...extra }, status);
 }
 
 function integer(value, fallback, minimum) {
@@ -78,11 +79,14 @@ async function authenticated(request, env, raw, keys) {
 
 export default {
   async fetch(request, env) {
-    if (!webhookUrl(env.NOTIFY_ALERT_WEBHOOK_URL)) return rejected(503, "unavailable", "notify_unconfigured");
-    const keys = secrets(env.NOTIFY_WEBHOOK_SECRET);
-    if (!keys) return rejected(503, "unavailable");
     const path = new URL(request.url).pathname;
-    if (path === "/health" && request.method === "GET") return json({ ok: true });
+    const health = path === "/health" && request.method === "GET";
+    // GET /health reports only the drill flag, even when it fails closed.
+    const status = health ? { drill_mode: drillMode(env) } : {};
+    if (!webhookUrl(env.NOTIFY_ALERT_WEBHOOK_URL)) return rejected(503, "unavailable", "notify_unconfigured", status);
+    const keys = secrets(env.NOTIFY_WEBHOOK_SECRET);
+    if (!keys) return rejected(503, "unavailable", "unavailable", status);
+    if (health) return json({ ok: true, ...status });
     if (path !== "/alert") return rejected(404, "not_found");
     if (request.method !== "POST") {
       return json({ error: "method_not_allowed" }, 405, { Allow: "POST" });
@@ -164,7 +168,7 @@ export class AlertLedger {
       let record = await this.storage.get("record");
       if (record) return json({ incident, status: record.status });
       record = { incident, status: "pending", attempts: 0, first_seen: now(this.env) };
-      if (this.env.DRILL_MODE === "1") record.drill = true;
+      if (drillMode(this.env)) record.drill = true;
       record.retry_at = now(this.env) + 30_000;
       await this.save(record, record.retry_at);
       if (record.drill === true) console.log(JSON.stringify({ event: "drill_mode", incident, drill: true }));
