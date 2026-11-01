@@ -216,6 +216,8 @@ class NodeRun:
                         NODE_RUN_BENIGN_SMOKE='1', FALLBACK_MAX_RUNNING_REQUESTS='64')
         self.env.setdefault('WEIGHTS_DIR', '/mnt/nvme/models/dsv41-uncensored')
         self.env.setdefault('MAX_RUNNING_REQUESTS', '128')
+        # Guards share GPU 7 (0.06 + 0.02). Leave the engine the same headroom it has without them.
+        self.env.setdefault('MEM_FRACTION', '0.76')
         if self.env['MAX_RUNNING_REQUESTS'] not in ('128', '64'):
             raise GateFailure('MAX_RUNNING_REQUESTS must be 128 or 64')
         if not self.env.get('INFER_UPSTREAM_KEY'):
