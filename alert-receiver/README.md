@@ -35,7 +35,7 @@ Drill mode is on only when `DRILL_MODE` is exactly the string `"1"`. Unset and a
 
 The ledger decides the mode once when it first accepts an incident and stores `drill: true` only for drill incidents. Production records have no `drill` field. Every attempt uses that stored flag, so retries send identical payload bytes and headers after a restart or a change to `DRILL_MODE`.
 
-Drill notifications prefix both `title` and `body` with exactly `"DRILL, not a real incident. "`, including the trailing space, followed by the existing production text. `summary`, `project`, and the JSON field set and order stay unchanged. The Idempotency-Key is `b300-safety-drill-<incident>` instead of the production key `b300-safety-<incident>`. At acceptance, the receiver logs `{"event":"drill_mode","incident":"<incident>","drill":true}` exactly once with `console.log`, without the webhook URL or token. Retries and duplicate POSTs add no drill log line, and duplicates send nothing. Production logs are unchanged.
+Drill notifications prefix `title`, `summary`, and `body` with exactly `"DRILL, not a real incident. "`, including the trailing space, followed by the existing production text. The summary is prefixed because it can be what shows on the lock screen. `project` and the JSON field set and order stay unchanged. The Idempotency-Key is `b300-safety-drill-<incident>` instead of the production key `b300-safety-<incident>`. At acceptance, the receiver logs `{"event":"drill_mode","incident":"<incident>","drill":true}` exactly once with `console.log`, without the webhook URL or token. Retries and duplicate POSTs add no drill log line, and duplicates send nothing. Production logs are unchanged.
 
 ## Notify webhook
 

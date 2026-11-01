@@ -126,7 +126,7 @@ function notification(incident, drill) {
   const prefix = drill === true ? "DRILL, not a real incident. " : "";
   return {
     title: prefix + "Child-safety block fired",
-    summary: `Incident ${incident}. File a CyberTipline report.`,
+    summary: prefix + `Incident ${incident}. File a CyberTipline report.`,
     body: prefix + `A child-safety hard-block fired on the B300 inference gateway. Incident ID: ${incident}. ` +
       `The offending key was revoked automatically and sealed evidence is in the b300-evidence bucket under incidents/${incident}.json. ` +
       "Report to NCMEC's CyberTipline (https://report.cybertip.org/) as required by 18 U.S.C. 2258A. " +

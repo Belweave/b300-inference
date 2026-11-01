@@ -190,7 +190,7 @@ for (const mode of [undefined, "0", "true", " 1", 1]) {
   });
 }
 
-test("drill prefixes the full title and body, preserves other fields, and uses a distinct key", async (t) => {
+test("drill prefixes the full title, summary, and body, preserves other fields, and uses a distinct key", async (t) => {
   const incident = randomUUID();
   const body = JSON.stringify({ incident });
   const production = harness(t);
@@ -207,7 +207,7 @@ test("drill prefixes the full title and body, preserves other fields, and uses a
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0].body, JSON.stringify({
     title: "DRILL, not a real incident. Child-safety block fired",
-    summary: `Incident ${incident}. File a CyberTipline report.`,
+    summary: `DRILL, not a real incident. Incident ${incident}. File a CyberTipline report.`,
     body: `DRILL, not a real incident. A child-safety hard-block fired on the B300 inference gateway. Incident ID: ${incident}. ` +
       `The offending key was revoked automatically and sealed evidence is in the b300-evidence bucket under incidents/${incident}.json. ` +
       "Report to NCMEC's CyberTipline (https://report.cybertip.org/) as required by 18 U.S.C. 2258A. " +
