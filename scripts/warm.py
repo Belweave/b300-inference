@@ -15,7 +15,8 @@ import urllib.request
 import uuid
 
 from warm_download import load_manifest, acquire
-from warm_logic import deadline, jit_start, ram_gate
+from warm_logic import deadline, jit_start, ram_gate, tunnel_slot
+from mirror_auth import parse_mirror_auth
 from warm_network import probe, public_url
 from readiness import check
 from redact import redact, secret_values
@@ -48,6 +49,9 @@ def settings(data, env, ram):
 
 class Warm:
     def __init__(self, env):
+        # Validate operator-exported values before filesystem/network/GPU work.
+        self.tunnel_slot = tunnel_slot(env)
+        parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
         self.env = env
         self.data = load_manifest()
         self.end = deadline(int(env['WINDOW_END']))
@@ -56,16 +60,16 @@ class Warm:
         self.path = self.run.with_suffix('.json')
         self.ready = self.run/'ready.json'
         self.record = {'model':self.data['model'], 'started_epoch':time.time(), 'deadline_epoch':self.end,
-                       'stages':{}, 'state':'warming'}
+                       'stages':{}, 'state':'warming', 'tunnel_slot':self.tunnel_slot}
         self.lock = threading.RLock()
         self.name = 'b300-warm-'+self.id.lower()
         self.created = False
-        self.secrets = secret_values()
+        self.secrets = secret_values(env)
 
     def save(self):
         with self.lock:
             tmp = self.path.with_suffix('.tmp')
-            tmp.write_text(json.dumps(self.record,indent=2)+'\n'); tmp.replace(self.path)
+            tmp.write_text(redact(json.dumps(self.record,indent=2),self.secrets)+'\n'); tmp.replace(self.path)
 
     def remaining(self):
         value = self.end-time.time()
@@ -207,7 +211,8 @@ class Warm:
         with ThreadPoolExecutor(max_workers=3) as pool:
             image=pool.submit(self.stage,'image',self.image)
             weights=pool.submit(self.stage,'weights_and_hash',self.weights)
-            network=pool.submit(self.stage,'network',lambda:probe(self.data,self.env.get('MIRROR_URL'),self.env.get('MIRROR_TEST_OBJECT','speed-test.bin')))
+            network=pool.submit(self.stage,'network',lambda:probe(self.data,self.env.get('MIRROR_URL'),
+                self.env.get('MIRROR_TEST_OBJECT','speed-test.bin'),self.env.get('MIRROR_AUTH_HEADER')))
             self.record['network']=network.result()
             image_id=image.result(); weights.result()
         self.remaining()
@@ -224,10 +229,14 @@ class Warm:
             for path in sorted((ROOT/'config/warm-prefixes').glob('*.json')):
                 self.completion(json.loads(path.read_text()),16)
         self.stage('prefix_replay',replay)
+        self.publish_ready()
+
+    def publish_ready(self):
         self.remaining()
         now=time.time(); elapsed=now-self.record['started_epoch']
         signal={'schema':1,'state':'ready','model':self.data['model']['repo'],'revision':self.data['model']['revision'],
-                'ready_epoch':now,'deadline_epoch':self.end,'container':self.name,'timing_file':str(self.path)}
+                'ready_epoch':now,'deadline_epoch':self.end,'container':self.name,'timing_file':str(self.path),
+                'tunnel_slot':self.tunnel_slot}
         self.record.update(state='ready',end_epoch=now,warm_seconds=elapsed,jit_start_epoch=jit_start(int(self.env['WINDOW_END']),elapsed))
         self.save()
         tmp=self.ready.with_suffix('.tmp');tmp.write_text(json.dumps(signal)+'\n')
@@ -241,7 +250,11 @@ def main():
     (ROOT/'runs').mkdir(exist_ok=True)
     with (ROOT/'runs/warm.lock').open('w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        warm=Warm(os.environ)
+        try:
+            warm=Warm(os.environ)
+        except ValueError as exc:
+            print('WARM FAILED: '+redact(str(exc),secret_values()),file=sys.stderr)
+            return 1
         try:
             warm.run_all()
         except BaseException as exc:

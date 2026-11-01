@@ -25,7 +25,10 @@ The model is MIT, DeepseekV41ForCausalLM, mixed FP8/FP4 experts.
 
 ## On the replacement node (operator action, not run by this PR)
 
-Export an existing upstream key and `WINDOW_END` (the **old node's** expiry).
+Export an existing upstream key, `WINDOW_END` (the **old node's** expiry), and
+`TUNNEL_SLOT` with exactly `a` or `b`. The operator exports the slot from their
+node environment; warm-up reads only the process environment and never sources
+or reads `node.env`. A missing or invalid slot fails before downloads or GPU work.
 No credential files are sourced by these tools. With Python dependencies and
 Docker already installed, run `scripts/warm.sh`. It does not start a tunnel, flip
 a gateway, acquire GPUs or release allocations. It refuses an occupied local
@@ -74,6 +77,17 @@ speed below the floor trigger a per-shard mirror retry; the mirror is verified
 identically. Failed partial transfers restart that shard. Small files can use
 mirror fallback only when included in its validated manifest; otherwise they use HF.
 No credentials belong in URLs. Netops owns the mirror; this PR creates no bucket.
+Optional `MIRROR_AUTH_HEADER` is one complete `Name: value` header, such as
+an Authorization bearer header or a custom `X-Foo` header. Export it through the
+operator's existing environment; leave it unset or empty for plain GETs. Header
+names must be HTTP tokens and values must be nonempty single-line HTTP field
+values; malformed input fails with an error that omits the supplied value.
+The header is sent on mirror manifest, shard/small-file and R2 speed-test
+requests only, including the measurement probe. It is never sent to HF or the
+location probe, placed in URLs, or included in reports. Authenticated mirror
+redirects are refused so credentials cannot follow a redirect to another host;
+configure `MIRROR_URL` to the final HTTPS origin. Mirror request errors discard
+raw HTTP exception details, and log redaction masks both the full line and value.
 Network timing records only Cloudflare `colo`/`loc` and bounded 8 MiB HF/R2 probe
 speeds, not IPs or URLs. Set `MIRROR_TEST_OBJECT` (default `speed-test.bin`) for R2.
 Probe throughput is a sample; transfer records contain actual full-shard speeds.
@@ -104,7 +118,9 @@ loads, remote 101 GB shards or cross-device copies can exceed it even at 10 Gbit
 
 Success atomically writes `runs/warm-<id>/ready.json` and prints one
 `READY <JSON>` line. Schema 1 contains `state`, `model`, `revision`, `ready_epoch`,
-`deadline_epoch`, `container`, `timing_file`. Netops must independently probe the
+`deadline_epoch`, `container`, `timing_file`, and additive `tunnel_slot` (`a` or
+`b`, from the validated `TUNNEL_SLOT` environment variable). Schema stays at 1;
+the ready file and stdout line carry the same slot. Netops must independently probe the
 new origin through its route before flipping. A PID or ready file alone is not
 proof of public reachability. No ready signal is emitted after
 `WINDOW_END - 13 minutes`; failure removes any new ready file and stops only the
