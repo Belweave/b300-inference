@@ -9,6 +9,7 @@ from pathlib import Path
 import pty
 import re
 import shutil
+import itertools
 import site
 import subprocess
 import sys
@@ -279,24 +280,52 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report['state'], 'failed')
         self.assertFalse((self.folder/'warm.jsonl').exists())
 
-    async def test_tunnel_prerequisites_fail_before_docker_or_warm(self):
-        for mode in ('missing script', 'nonexecutable script', 'missing token', 'empty token'):
-            with self.subTest(mode=mode):
-                config = tunnel_fixture(self.folder)
-                script = self.folder/'node-tunnel.sh'
-                if mode == 'missing script': script.unlink()
-                if mode == 'nonexecutable script': script.chmod(0o600)
-                if mode == 'missing token': config.write_text('')
-                if mode == 'empty token': config.write_text('CF_TUNNEL_TOKEN=""\n')
-                code, output, report = await self.invoke(CF_TUNNEL_TOKEN=TUNNEL_TOKEN)
-                self.assertNotEqual(code, 0)
-                reason = ('tunnel script ~/node-tunnel.sh missing or not executable' if 'script' in mode else
-                          'CF_TUNNEL_TOKEN missing or empty in '+str(config))
-                self.assertIn('FAIL preflight: '+reason, output)
-                self.assertEqual(report['tunnel']['preflight']['status'], 'FAIL')
-                self.assertNotIn('NODE READY FOR DRILL', output)
-                self.assertFalse((self.folder/'warm.jsonl').exists())
-                self.assertFalse((self.folder/'docker.jsonl').exists())
+    async def assert_tunnel_preflight_fails(self, mode):
+        config = tunnel_fixture(self.folder)
+        script = self.folder/'node-tunnel.sh'
+        if mode == 'missing script': script.unlink()
+        if mode == 'nonexecutable script': script.chmod(0o600)
+        if mode == 'missing token': config.write_text('')
+        if mode == 'empty token': config.write_text('CF_TUNNEL_TOKEN=""\n')
+        code, output, report = await self.invoke(CF_TUNNEL_TOKEN=TUNNEL_TOKEN)
+        self.assertNotEqual(code, 0)
+        reason = ('tunnel script ~/node-tunnel.sh missing or not executable' if 'script' in mode else
+                  'CF_TUNNEL_TOKEN missing or empty in '+str(config))
+        self.assertIn('FAIL preflight: '+reason, output)
+        self.assertIn('TEARDOWN BY', output)
+        self.assertEqual(report['tunnel']['preflight']['status'], 'FAIL')
+        self.assertNotIn('NODE READY FOR DRILL', output)
+        self.assertNotIn(TUNNEL_TOKEN, output)
+        self.assertFalse((self.folder/'warm.jsonl').exists())
+        self.assertFalse((self.folder/'docker.jsonl').exists())
+
+    async def test_tunnel_preflight_missing_script(self):
+        await self.assert_tunnel_preflight_fails('missing script')
+
+    async def test_tunnel_preflight_nonexecutable_script(self):
+        await self.assert_tunnel_preflight_fails('nonexecutable script')
+
+    async def test_tunnel_preflight_missing_token(self):
+        await self.assert_tunnel_preflight_fails('missing token')
+
+    async def test_tunnel_preflight_empty_token(self):
+        await self.assert_tunnel_preflight_fails('empty token')
+
+    async def test_tunnel_up_full_script(self):
+        code, output, report = await self.invoke()
+        self.assertEqual(code, 0, output)
+        lines = output.splitlines()
+        ready = next(i for i, line in enumerate(lines) if line.startswith('NODE READY FOR DRILL '))
+        up = lines.index('TUNNEL UP url='+self.url)
+        teardown = next(i for i, line in enumerate(lines) if line.startswith('TEARDOWN BY'))
+        self.assertLess(ready, up)
+        self.assertLess(up, teardown)
+        self.assertNotIn('TUNNEL NOT STARTED', output)
+        self.assertEqual(report['decision'], 128)
+        self.assertEqual(report['state'], 'ready')
+        self.assertTrue(report['tunnel']['launched'])
+        self.assertEqual(report['tunnel']['reason'], None)
+        self.assertNotIn(TUNNEL_TOKEN, output+json.dumps(report))
 
     async def test_tunnel_timeout_and_launch_failure_leave_fit_green(self):
         for mode in ('tunnel-530', 'launch-failure'):
@@ -739,7 +768,7 @@ class PureNodeTests(unittest.TestCase):
             context = AsyncMock()
             context.__aenter__.return_value = session
             with patch('aiohttp.ClientSession', return_value=context), \
-                 patch('node_tunnel.time.monotonic', side_effect=[0, 2, 2, 2, 2, 2]), \
+                 patch('node_tunnel.time', Mock(monotonic=Mock(side_effect=itertools.chain([0], itertools.repeat(2))))), \
                  patch('node_tunnel.asyncio.sleep', new=AsyncMock()):
                 self.assertEqual(asyncio.run(node_tunnel.reachable('https://example.invalid', 1)), expected)
             kwargs = session.post.call_args.kwargs
