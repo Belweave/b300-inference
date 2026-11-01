@@ -75,6 +75,10 @@ and returns HTTP 401 without a key. `infer.belweave.tech` was retired as the
 API host on Nov 1, 2026; it now serves the marketing site, not the API.
 Netops owns DNS and Worker routing.
 
+In the operator's `~/.config/b300/client.env`, use
+`INFER_URL=https://api.infer.belweave.ai/v1`; the value must include `/v1`.
+The kit itself does not read this file.
+
 ```text
 api.infer.belweave.ai Worker (client keys, limits, between-window 503)
                 |
