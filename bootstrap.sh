@@ -210,6 +210,9 @@ fi
 phase tunnel
 if [[ $SELECTED_NETWORK_MODE == cloudflared ]]; then
     if [[ ! -f $RUN_DIR/cloudflared.pid ]] || ! kill -0 "$(cat "$RUN_DIR/cloudflared.pid")" 2>/dev/null; then
+        # Netops appends to a shared file; record this launch's starting boundary.
+        python3 "$KIT_ROOT/scripts/tunnel_log.py" mark /tmp/cloudflared.log "$RUN_DIR/cloudflared-log-cursor.json"
+        # Execute, never source: the helper unsets CF_TUNNEL_TOKEN in its own process.
         tunnel_output=$("$KIT_ROOT/vendor/infer-gateway/node-tunnel.sh" 9>&-)
         tunnel_pid=$(printf '%s\n' "$tunnel_output" | sed -n 's/^tunnel started, pid \([0-9][0-9]*\)$/\1/p')
         [[ $tunnel_pid =~ ^[0-9]+$ ]] || die 'Tunnel helper returned no PID'

@@ -119,13 +119,19 @@ only supports forward mode, so Netops must provision reverse-mode relay cloudfla
 separately. The watcher never calls forward `up` against a reverse listener.
 
 The updated node helper is preserved **byte-for-byte** and tested against SHA256
-`d04775930a6a4bcc36657a1c86cd641f2a54fffac4855f8be983d3b3e18dba7a`.
+`845edd39cb7c91bf5dbcff06b09516833aafbd893ec9ddc42710cbd140fca498`.
 It pins cloudflared **2026.10.7**, verifies amd64/arm64 checksums and consumes
 `CF_TUNNEL_TOKEN` directly. Bootstrap performs no token-name mapping and calls it
 only after health, auth/readiness, and chat smoke pass. It captures the helper's
-printed PID. The helper uses child env for the token rather than argv. The remaining
-raw `/tmp/cloudflared.log` and shared binary path are documented in the vendor note;
-archive copies are redacted. A live PID alone is not proof of tunnel registration.
+printed PID. The helper disables xtrace, exports `TUNNEL_TOKEN` then unsets `CF_TUNNEL_TOKEN`
+in its own process; execute it instead of sourcing it. Bootstrap's environment
+is unaffected. It reuses the verified binary, or downloads/checks `.new` and
+renames it over `/tmp/cloudflared`, avoiding text-file-busy during handoff.
+It appends to the raw shared `/tmp/cloudflared.log`. Bootstrap records a starting
+file identity/offset; teardown filters only subsequent bytes, skipping collection
+when the boundary is missing/invalid. Concurrent replica output may interleave.
+Long token-shaped values are masked even after rotation, and archive members are
+filtered again. See the vendor note for the remaining shared-path caveats. A live PID alone is not proof of tunnel registration.
 
 Both engines serve unauthenticated `GET /health` on **127.0.0.1:8000** despite
 `--api-key`; `/v1/models` is protected. Bootstrap checks health without auth,

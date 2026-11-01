@@ -83,7 +83,9 @@ scp -P <port> -p vendor/infer-gateway/node-tunnel.sh <user@node>:~/
 ```
 
 ```bash
-# NODE: tunnel; the helper reads CF_TUNNEL_TOKEN.
+# NODE: tunnel; execute (do not source) the helper after sourcing node.env.
+# It exports TUNNEL_TOKEN and unsets CF_TUNNEL_TOKEN only inside its own process.
+# It appends to raw /tmp/cloudflared.log across runs; do not share that file unredacted.
 set +x
 set -a; . ~/node.env; set +a
 ~/node-tunnel.sh

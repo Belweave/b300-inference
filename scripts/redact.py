@@ -5,6 +5,8 @@ import sys
 
 API_KEY = re.compile(r'''(?i)(["']?(?:api[_-]?key|admin_api_key)["']?\s*[:=]\s*)(?:\[REDACTED\]|"[^"\n]*"|'[^'\n]*'|[^\s,}\])]+)''')
 BEARER = re.compile(r'''(?i)(Bearer\s+)[^\s"',;]+''')
+# Rotated tokens may occur in interleaved replica logs without matching current env.
+CLOUDFLARE_TOKEN = re.compile(r'\beyJ[A-Za-z0-9_+/\-]{40,}={0,2}')
 
 
 def secret_values(env=None):
@@ -16,7 +18,8 @@ def redact(line, secrets):
     for value in secrets:
         line = line.replace(value, '[REDACTED]')
     line = API_KEY.sub(r'\1[REDACTED]', line)
-    return BEARER.sub(r'\1[REDACTED]', line)
+    line = BEARER.sub(r'\1[REDACTED]', line)
+    return CLOUDFLARE_TOKEN.sub('[REDACTED]', line)
 
 
 if __name__ == '__main__':

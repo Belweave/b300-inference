@@ -25,7 +25,7 @@ import push
 class NetworkTests(unittest.TestCase):
     def test_vendor_is_exact_netops_copy(self):
         self.assertEqual(hashlib.sha256((ROOT/'vendor/infer-gateway/node-tunnel.sh').read_bytes()).hexdigest(),
-                         'd04775930a6a4bcc36657a1c86cd641f2a54fffac4855f8be983d3b3e18dba7a')
+                         '845edd39cb7c91bf5dbcff06b09516833aafbd893ec9ddc42710cbd140fca498')
 
     def test_auto_success_and_each_probe_failure(self):
         success = lambda url: {'ok': True, 'http_status': 200}

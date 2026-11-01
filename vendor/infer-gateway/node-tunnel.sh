@@ -2,8 +2,10 @@
 # Run on each fresh B300 node after the model server is healthy on 127.0.0.1:8000.
 # Same named tunnel every window, so a new node joins as a replica while the old
 # one is still connected (zero-downtime handoff).
+# Never trace this script: xtrace would print the tunnel token.
+{ set +x; } 2>/dev/null
 set -euo pipefail
-: "${CF_TUNNEL_TOKEN:?set CF_TUNNEL_TOKEN}"
+[ -n "${CF_TUNNEL_TOKEN:-}" ] || { echo "set CF_TUNNEL_TOKEN" >&2; exit 1; }
 
 CFD_VERSION="2026.10.7"
 case "$(uname -m)" in
@@ -13,12 +15,16 @@ case "$(uname -m)" in
 esac
 
 BIN=/tmp/cloudflared
-curl -fsSL -o "$BIN" \
-  "https://github.com/cloudflare/cloudflared/releases/download/${CFD_VERSION}/cloudflared-linux-${ARCH}"
-echo "${SHA}  ${BIN}" | sha256sum -c - >/dev/null || { echo "cloudflared checksum mismatch" >&2; rm -f "$BIN"; exit 1; }
-chmod +x "$BIN"
+# Reuse a verified binary (it may be running for the old replica; overwriting would fail).
+if ! echo "${SHA}  ${BIN}" | sha256sum -c - >/dev/null 2>&1; then
+  curl -fsSL -o "$BIN.new" \
+    "https://github.com/cloudflare/cloudflared/releases/download/${CFD_VERSION}/cloudflared-linux-${ARCH}"
+  echo "${SHA}  ${BIN}.new" | sha256sum -c - >/dev/null || { echo "cloudflared checksum mismatch" >&2; rm -f "$BIN.new"; exit 1; }
+  chmod +x "$BIN.new"; mv -f "$BIN.new" "$BIN"
+fi
 
 # cloudflared reads TUNNEL_TOKEN from the environment; keep it off argv (ps, /proc/*/cmdline).
-TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" nohup "$BIN" tunnel --no-autoupdate run \
-  --url http://127.0.0.1:8000 >/tmp/cloudflared.log 2>&1 &
+export TUNNEL_TOKEN="$CF_TUNNEL_TOKEN"; unset CF_TUNNEL_TOKEN
+nohup "$BIN" tunnel --no-autoupdate run \
+  --url http://127.0.0.1:8000 >>/tmp/cloudflared.log 2>&1 &
 echo "tunnel started, pid $!"

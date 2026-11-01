@@ -32,9 +32,6 @@ fi
 status collecting running
 nvidia-smi -q 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/nvidia-final.txt" || true
 python3 "$KIT_ROOT/scripts/origin_request.py" /metrics 2>/dev/null | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/metrics.txt" || true
-if [[ -f /tmp/cloudflared.log && -f $RUN_DIR/cloudflared.pid ]]; then
-    python3 "$KIT_ROOT/scripts/redact.py" < /tmp/cloudflared.log > "$RUN_DIR/cloudflared.log"
-fi
 stop_connector() {
     if [[ -f $RUN_DIR/cloudflared.pid ]]; then
         local pid
@@ -66,6 +63,10 @@ stop_service() {
 stop_service "$GATEWAY_NAME"
 stop_service "$SERVER_NAME"
 stop_connector
+if [[ -f $RUN_DIR/cloudflared.pid ]]; then
+    python3 "$KIT_ROOT/scripts/tunnel_log.py" collect /tmp/cloudflared.log \
+        "$RUN_DIR/cloudflared-log-cursor.json" "$RUN_DIR/cloudflared.log"
+fi
 if [[ -f $RUN_DIR/reverse.pid ]]; then
     reverse_pid=$(cat "$RUN_DIR/reverse.pid")
     if [[ $reverse_pid =~ ^[0-9]+$ && -r /proc/$reverse_pid/cmdline ]] && tr '\0' ' ' < "/proc/$reverse_pid/cmdline" | grep -Fq "$KIT_ROOT/scripts/reverse-tunnel.sh"; then

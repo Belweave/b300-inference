@@ -57,6 +57,15 @@ and Bearer tokens. Docker uses `--log-driver none`, so `docker logs` cannot reta
 raw startup output. A normal Docker logging driver would retain SGLang's echoed
 key before a host-side filter could protect it.
 
+The tunnel helper disables xtrace, reuses a checksum-verified binary (otherwise
+checks a `.new` download and renames it), and appends to its raw shared log.
+Bootstrap records its file identity/offset before executing the helper; teardown
+collects only that suffix and omits it if the cursor is missing/invalid. Overlap
+may interleave other replicas' output. The redactor also masks long Cloudflare
+token-shaped strings so rotated tokens do not depend on the current env value.
+The helper exports `TUNNEL_TOKEN` and unsets `CF_TUNNEL_TOKEN` only in its own
+process; it must not be sourced. The parent's environment is unchanged.
+
 Teardown filters collected cloudflared output and re-passes every diagnostic
 archive member through `redact.py`. Env files, keys, symlinks and incoming image
 archives are excluded. Scratch storage contains filtered bytes only. Fake-key
