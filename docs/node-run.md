@@ -101,3 +101,39 @@ flags, guard cache access and memory fractions still needs supervised node
 qualification. A failed guard startup or final fit produces no handoff. GPU
 memory deltas can include concurrent serving-engine allocations; the final
 headroom check reads actual free memory again after load.
+
+## Tunnel preamble (required)
+
+From the Mac, before running node-run.sh:
+
+```
+scp -P <port> -p vendor/infer-gateway/node-tunnel.sh <user@node>:~/
+```
+
+`~/node.env` (mode 600) must define a non-empty `CF_TUNNEL_TOKEN`. Set it through a masked card; never paste the value in chat. node-run.sh sources it like Netops does (`set -a; . ~/node.env; set +a`) without echo, and passes the token only to `~/node-tunnel.sh`.
+
+Gate 1 (preflight) hard-FAILs before any download or docker pull if `~/node-tunnel.sh` is missing or not executable, or `CF_TUNNEL_TOKEN` is missing or empty. It prints what is missing and the teardown time.
+
+After `NODE READY FOR DRILL`, node-run.sh starts `~/node-tunnel.sh` detached (redacted log in the run dir) and polls the public origin for up to 180 s. Proof of reachability is a keyless POST to `/v1/safety/csam` that the relay answers with 401. It prints one of:
+
+```
+TUNNEL UP url=https://infer-origin.belweave.tech
+TUNNEL NOT STARTED reason=<launch failed|timeout>
+```
+
+A tunnel failure never tears down the node, changes the fit, or changes the exit status; it is recorded in the report. `/tmp/cloudflared.log` is written by Netops' helper, raw and unredacted; do not share it.
+
+## Time budget (estimates, 3.125 h = 187.5 min credit cap)
+
+| Phase | Best | Worst |
+|---|---|---|
+| Image pull | 3 | 10 |
+| Weights, 510 GB (observed 4 to 10 min on this provider; 60 min WARM_TIMEOUT_SECONDS stays the backstop) | 4 | 10 |
+| Engine load + graph capture | 8 | 20 |
+| Guards start | 3 | 8 |
+| Safety checks + load test | 2 | 3 |
+| 64 fallback relaunch | 0 | 20 |
+| Tunnel up | 1 | 3 |
+| Netops drill | 15 | 30 |
+| Teardown margin | 10 | 10 |
+| **Total (min)** | **46** | **114** |

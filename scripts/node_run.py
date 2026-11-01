@@ -1,4 +1,4 @@
-"""Supervised node bring-up. No tunnels, retries, allocation actions or secret files."""
+"""Supervised node bring-up and tunnel handoff; no allocation actions or secret files."""
 import asyncio
 from contextlib import contextmanager
 import csv
@@ -18,13 +18,15 @@ import sys
 import time
 
 from redact import redact, secret_values
+import node_tunnel
 from relay_config import read_classifier_key
 from serve_plan import front_port, image_reference, require_pinned
 from warm_logic import concurrency_fit, parse_pool, tunnel_slot
 
 ROOT = Path(__file__).resolve().parents[1]
 GATES = ('preflight', 'warm-timeout', 'key', 'warm', 'guards', 'relay-safety',
-         'kv-pool', 'loadtest', 'fit', 'key-leak', 'handoff')
+         'kv-pool', 'loadtest', 'fit', 'handoff', 'key-leak')
+CREDENTIALS = ('SAFETY_CLASSIFIER_KEY', 'CF_TUNNEL_TOKEN', 'TUNNEL_TOKEN')
 
 
 class GateFailure(Exception):
@@ -59,9 +61,11 @@ def provisioned(value, now):
 class NodeRun:
     def __init__(self):
         self.env = dict(os.environ)
-        self.env.pop('SAFETY_CLASSIFIER_KEY', None)
-        os.environ.pop('SAFETY_CLASSIFIER_KEY', None)
+        for name in CREDENTIALS:
+            self.env.pop(name, None)
+            os.environ.pop(name, None)
         self.key = ''
+        self.tunnel_token = ''
         self.secrets = secret_values(self.env)
         self.started = time.time()
         self.end = self.started + 11250 - 600
@@ -73,7 +77,9 @@ class NodeRun:
         self.record = {'schema': 1, 'state': 'running', 'started_epoch': self.started,
                        'gates': [], 'measurements': {}, 'decision': None,
                        'image_digest': None, 'git_sha': None,
-                       'report': str(self.path), 'run_dir': str(self.run)}
+                       'report': str(self.path), 'run_dir': str(self.run),
+                       'tunnel': {'preflight': None, 'launched': False, 'pid': None,
+                                  'status': 'not started', 'reason': None, 'waited_seconds': 0}}
         self.lock = None
         self.warm_report = None
         self.current = None
@@ -123,7 +129,8 @@ class NodeRun:
 
     def command(self, argv, timeout=30, env=None, input_text=None, check=True, merge_output=False):
         child_env = dict(self.env if env is None else env)
-        child_env.pop('SAFETY_CLASSIFIER_KEY', None)
+        for name in CREDENTIALS:
+            child_env.pop(name, None)
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT if merge_output else subprocess.PIPE, text=True,
                                 env=child_env, cwd=ROOT, start_new_session=True)
@@ -147,15 +154,38 @@ class NodeRun:
     def source_node_env(self):
         # Source the existing mode/ownership-checked loader in a quiet child.
         # The environment travels over an anonymous pipe only, never a file.
+        # node-env.sh sources with set -a, matching Netops. Extract the token with
+        # a shell builtin, then remove it before the environment-dump child starts.
         script = ('set +x; set -euo pipefail; source "$1" >/dev/null 2>&1; set +x; '
+                  'printf "%s\\0" "${CF_TUNNEL_TOKEN:-}"; '
+                  'unset CF_TUNNEL_TOKEN TUNNEL_TOKEN SAFETY_CLASSIFIER_KEY; '
                   'exec "$2" -B -c "import json,os; print(json.dumps(dict(os.environ)))"')
         code, output = self.command(['bash', '-c', script, 'node-env',
                                      str(ROOT/'scripts/node-env.sh'), sys.executable], check=False)
         if code:
             raise GateFailure('node env could not be sourced; require current owner, mode 600 and valid shell')
-        self.env = json.loads(output)
-        self.env.pop('SAFETY_CLASSIFIER_KEY', None)
-        self.secrets = secret_values(self.env)
+        self.tunnel_token, _, exported = output.partition('\0')
+        self.env = json.loads(exported)
+        self.refresh_secrets()
+
+    def refresh_secrets(self):
+        self.secrets = secret_values({**self.env, 'SAFETY_CLASSIFIER_KEY': self.key,
+                                     'CF_TUNNEL_TOKEN': self.tunnel_token})
+
+    def tunnel_preflight(self):
+        result = node_tunnel.prerequisites(self.env, self.tunnel_token,
+                                          ROOT/'vendor/infer-gateway/node-tunnel.sh')
+        self.record['tunnel']['preflight'] = result
+        if result['status'] != 'PASS':
+            self.record['tunnel']['reason'] = result['reason']
+            raise GateFailure(result['reason'])
+        try:
+            self.tunnel_url = node_tunnel.public_url(
+                self.env, self.env.get('RELAY_PUBLIC_URL', 'https://infer-origin.belweave.tech'))
+            self.tunnel_wait = number(self.env, 'TUNNEL_WAIT_SECONDS', 180)
+        except ValueError as exc:
+            raise GateFailure(str(exc)) from None
+        self.record['tunnel']['url'] = self.tunnel_url
 
     def preflight(self):
         self.source_node_env()
@@ -177,9 +207,11 @@ class NodeRun:
             raise GateFailure('another node-run is active') from None
         testing = self.env.get('NODE_RUN_TESTING') == '1'
         test_names = ('EXPECT_GPU_NAME', 'EXPECT_GPU_COUNT', 'NODE_RUN_WARM_CMD', 'NODE_RUN_RELAY_URL',
-                      'NODE_RUN_GUARD_HEALTH_URL')
+                      'NODE_RUN_GUARD_HEALTH_URL', 'NODE_RUN_TUNNEL_PUBLIC_URL')
         if not testing and any(name in self.env for name in test_names):
             raise GateFailure('test overrides require NODE_RUN_TESTING=1')
+        # Hard gate before even docker info, and before downloads/pulls/warm.
+        self.tunnel_preflight()
         self.env.update(SAFETY='1', SSE_RELAY='1', LAYOUT='tp8', NODE_RUN_STDIN='1',
                         NODE_RUN_BENIGN_SMOKE='1', FALLBACK_MAX_RUNNING_REQUESTS='64')
         self.env.setdefault('WEIGHTS_DIR', '/mnt/nvme/models/dsv41-uncensored')
@@ -292,7 +324,7 @@ class NodeRun:
             self.key = read_classifier_key(sys.stdin)
         except ValueError as exc:
             raise GateFailure(str(exc)) from None
-        self.secrets = secret_values({**self.env, 'SAFETY_CLASSIFIER_KEY': self.key})
+        self.refresh_secrets()
 
     def warm(self, fallback=False):
         self.cap_warm_timeout()
@@ -474,9 +506,11 @@ class NodeRun:
     def check_key_leak(self):
         # Literal, streaming grep in-process: the pattern never enters argv/env/files.
         # Include warm's sibling report/logs and all runs outputs, even on failure.
-        if not self.key:
+        needles = [(label, value.encode()) for label, value in
+                   (('classifier key', self.key), ('tunnel token', self.tunnel_token)) if value]
+        if not needles:
             return
-        needle = self.key.encode()
+        overlap = max(len(needle) for _, needle in needles)-1
         for path in (ROOT/'runs').rglob('*'):
             if path.is_symlink():
                 raise GateFailure('cannot certify key-leak check with symlinks in runs')
@@ -486,13 +520,41 @@ class NodeRun:
             with path.open('rb') as stream:
                 while block := stream.read(1024*1024):
                     data = tail+block
-                    if needle in data:
-                        raise GateFailure('classifier key found in runs output (value suppressed)')
-                    tail = data[-max(0, len(needle)-1):] if len(needle) > 1 else b''
+                    for label, needle in needles:
+                        if needle in data:
+                            raise GateFailure(label+' found in runs output (value suppressed)')
+                    tail = data[-overlap:] if overlap else b''
+
+    def start_tunnel(self):
+        # The inference handoff is green. Optional tunnel timeout must not turn
+        # it red, but this step still cannot extend the absolute credit budget.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        started = time.monotonic()
+        until = started+max(0, min(self.tunnel_wait, self.end-time.time()))
+        result = self.record['tunnel']
+        result.update(status='not started', reason='timeout')
+        try:
+            if until > time.monotonic():
+                pid, reason, output = node_tunnel.launch(
+                    result['preflight']['script'], self.env, self.tunnel_token, until-time.monotonic())
+                # Both captured streams are redacted in memory before any disk write.
+                (self.run/'tunnel.log').write_text(self.safe(output))
+                result.update(launched=pid is not None, pid=pid, reason=reason or 'timeout')
+                self.save()
+                if pid is not None and asyncio.run(node_tunnel.reachable(self.tunnel_url, until)):
+                    result.update(status='up', reason=None)
+        except Exception:
+            # Neither arbitrary subprocess errors nor HTTP responses are printed.
+            result.update(status='not started', reason='launch failed')
+        result['waited_seconds'] = time.monotonic()-started
+        self.save()
+        if result['status'] == 'up':
+            self.say('TUNNEL UP url='+self.tunnel_url)
+        else:
+            self.say('TUNNEL NOT STARTED reason='+result['reason'])
 
     def reminder(self):
         utc = datetime.fromtimestamp(self.end if self.deadline_confirmed else self.started, timezone.utc)
-        self.say('Tunnel reminder: Netops must run ~/node-tunnel.sh for named tunnel b300-infer.')
         self.say('TEARDOWN BY '+utc.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')+
                  ' / '+utc.strftime('%Y-%m-%d %H:%M:%S UTC')+' (manual; release the allocation)')
 
@@ -505,8 +567,6 @@ class NodeRun:
         ):
             with self.gate(name):
                 action()
-        with self.gate('key-leak'):
-            self.check_key_leak()
         with self.gate('handoff'):
             self.record.update(state='ready', ended_epoch=time.time())
             self.save()
@@ -516,6 +576,12 @@ class NodeRun:
         self.say(f'NODE READY FOR DRILL relay={self.public_url} local=http://127.0.0.1:8000 '
                  f'fit={self.current} p99_ms={self.load.p99_ms:.2f} '
                  f'guard_vram_mib={self.guard_vram} report={self.path}')
+        self.start_tunnel()
+        with self.gate('key-leak', check_deadline=False):
+            self.record['ended_epoch'] = time.time()
+            self.check_key_leak()
+        # Include the final gate timing/report serialization in the literal scan.
+        self.check_key_leak()
 
 
 def main():
@@ -524,6 +590,7 @@ def main():
         for name in GATES:
             print('PLAN '+name)
         print('Plan: pinned TP8 warm; two pinned loopback guards; 130 rps; 128 or one fallback to 64.')
+        print('Plan: require tunnel helper/token/tools before warm; after handoff launch and probe without auth; scan both secrets.')
         print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; no automatic restarts.')
         return 0
     os.umask(0o077)
