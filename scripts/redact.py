@@ -17,7 +17,11 @@ class SecretValue(str):
 
 def secret_values(env=None):
     env = os.environ if env is None else env
-    values = {v for k, v in env.items() if v and any(s in k for s in ('TOKEN', 'KEY', 'PASSWORD', 'SECRET'))}
+    # This public capacity knob is a token COUNT, not a credential. Masking its
+    # digits corrupts numeric fit fields in JSON reports when explicitly set.
+    public = {'FIT_TOKENS_PER_STREAM'}
+    values = {v for k, v in env.items() if k not in public and v
+              and any(s in k for s in ('TOKEN', 'KEY', 'PASSWORD', 'SECRET'))}
     header = env.get('MIRROR_AUTH_HEADER')
     if header:
         values.add(header)

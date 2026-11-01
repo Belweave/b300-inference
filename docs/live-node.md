@@ -1,5 +1,7 @@
 # Live B300 launch
 
+For the supervised one-shot command, use [node-run](node-run.md).
+
 For the November 1 uncensored-model experiment, use the [A/B noon runbook](ab-serve-plans.md).
 The recipe below documents the earlier live server, not the new A/B defaults.
 

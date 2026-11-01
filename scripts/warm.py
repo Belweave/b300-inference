@@ -25,12 +25,20 @@ from mirror_auth import parse_mirror_auth
 from warm_network import probe, public_url
 from readiness import check
 from redact import redact, secret_values
+from relay_config import read_classifier_key, relay_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class EngineStopped(RuntimeError):
     """The engine container exited before health (e.g. KV/CUDA-graph OOM)."""
+
+
+def warm_timeout(env):
+    timeout = str(env.get('WARM_TIMEOUT_SECONDS', '1200'))
+    if not re.fullmatch(r'[0-9]+', timeout) or int(timeout) <= 0:
+        raise ValueError('WARM_TIMEOUT_SECONDS must be a positive integer')
+    return int(timeout)
 
 
 def settings(data, env, ram):
@@ -67,16 +75,14 @@ class Warm:
     def __init__(self, env):
         started = time.time()
         # Validate operator-exported values before filesystem/network/GPU work.
-        timeout = str(env.get('WARM_TIMEOUT_SECONDS', '1200'))
-        if not re.fullmatch(r'[0-9]+', timeout) or int(timeout) <= 0:
-            raise ValueError('WARM_TIMEOUT_SECONDS must be a positive integer')
-        timeout = int(timeout)
+        timeout = warm_timeout(env)
         self.tunnel_slot = tunnel_slot(env)
         parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
         variant(env)
         self.image_meta = image_reference(env)
         require_pinned(self.image_meta)
         self.env = env
+        self.child_env = {k: v for k, v in os.environ.items() if k != 'SAFETY_CLASSIFIER_KEY'}
         self.data = load_manifest()
         window_end = deadline(int(env['WINDOW_END']))
         self.end = min(window_end, started + timeout)
@@ -87,6 +93,7 @@ class Warm:
         self.path = self.run.with_suffix('.json')
         self.ready = self.run/'ready.json'
         self.record = {'model':self.data['model'], 'started_epoch':started, 'deadline_epoch':self.end,
+                       'window_end_epoch':int(env['WINDOW_END']),
                        'warm_timeout_seconds':timeout,
                        'stages':{}, 'state':'warming', 'tunnel_slot':self.tunnel_slot}
         self.lock = threading.RLock()
@@ -131,7 +138,7 @@ class Warm:
     def command(self, args):
         # Suppress exception stdout/argv; only sanitized output ever reaches disk.
         p = subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                           timeout=self.remaining(),check=False)
+                           timeout=self.remaining(),check=False,env=self.child_env)
         output = p.stdout.decode(errors='replace')
         with (self.run/'operations.log').open('a') as stream:
             stream.write(redact(output,self.secrets))
@@ -144,7 +151,7 @@ class Warm:
         with self.lock:
             self.record.update(self.image_meta); self.save()
         local = subprocess.run(['docker','image','inspect',image],stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL,timeout=self.remaining()).returncode == 0
+                               stderr=subprocess.DEVNULL,timeout=self.remaining(),env=self.child_env).returncode == 0
         if not (self.env.get('BAKED_IMAGE') and local): self.command(['docker','pull',image])
         image_id = self.command(['docker','image','inspect',image,'--format','{{.Id}}']).strip()
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',image_id): raise ValueError('Invalid image ID')
@@ -186,15 +193,14 @@ class Warm:
 
     def start_relay(self, selected):
         """SSE heartbeat relay on :8000 in front of the engine/router (scripts/sse_relay.py).
-        Detached so it keeps serving after warm-up exits; no secrets in its environment."""
+        Detached; only the safety allow-list (including its auth key) reaches the relay."""
         if selected.get('SSE_RELAY', '1') != '1':
             return None
         log = (self.run/'relay.log').open('ab')
-        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': os.environ.get('HOME', '/'), 'PORT': str(RELAY_PORT),
-               'ENGINE_PORT': selected['ENGINE_PORT'],
-               'SSE_HEARTBEAT_SECONDS': self.env.get('SSE_HEARTBEAT_SECONDS', '15')}
+        env = relay_environment(self.env, RELAY_PORT, selected['ENGINE_PORT'])
         proc = subprocess.Popen([sys.executable, str(ROOT/'scripts/sse_relay.py')], env=env, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        log.close()
         self.relay = proc
         import socket
         for _ in range(100):
@@ -248,9 +254,9 @@ class Warm:
         self.record['container']=self.name
         with (self.run/'engine.log').open('ab') as log:
             redactor=subprocess.Popen([sys.executable,str(ROOT/'scripts/redact.py')],stdin=subprocess.PIPE,
-                                      stdout=log,stderr=subprocess.DEVNULL,start_new_session=True)
+                                      stdout=log,stderr=subprocess.DEVNULL,start_new_session=True,env=self.child_env)
             engine=subprocess.Popen(plan['docker_start'],stdin=subprocess.PIPE,stdout=redactor.stdin,
-                                    stderr=subprocess.STDOUT,start_new_session=True)
+                                    stderr=subprocess.STDOUT,start_new_session=True,env=self.child_env)
             redactor.stdin.close()
             engine.stdin.write((json.dumps({'plan':plan,'env':{**selected,'INFER_UPSTREAM_KEY':self.env['INFER_UPSTREAM_KEY']}})+'\n').encode())
             engine.stdin.close()
@@ -269,8 +275,9 @@ class Warm:
                 state=self.command(['docker','inspect',self.name,'--format','{{.State.Running}}']).strip()
                 if state != 'true': raise EngineStopped('Engine stopped before health')
                 time.sleep(min(2,self.remaining()))
-        self.completion([{'role':'user','content':'Reply hi.'}])
-        self.completion([{'role':'user','content':'Count to three.'}],32,True)
+        benign = self.env.get('NODE_RUN_BENIGN_SMOKE') == '1'
+        self.completion([{'role':'user','content':'hello world' if benign else 'Reply hi.'}])
+        self.completion([{'role':'user','content':'hello world' if benign else 'Count to three.'}],32,True)
 
     def run_all(self):
         self.remaining()
@@ -316,6 +323,8 @@ class Warm:
         self.record['container_started_at'] = self.command(
             ['docker','inspect',self.name,'--format','{{.State.StartedAt}}']).strip()
         def replay():
+            if self.env.get('NODE_RUN_BENIGN_SMOKE') == '1':
+                return
             for path in sorted((ROOT/'config/warm-prefixes').glob('*.json')):
                 self.completion(json.loads(path.read_text()),16)
         self.stage('prefix_replay',replay)
@@ -356,11 +365,7 @@ class Warm:
             print(line, flush=True); print(line, file=sys.stderr, flush=True)
             with self.lock:
                 self.record['concurrency'] = info; self.save()
-            self.command(['docker','rm','-f',self.name]); self.created=False
-            if (self.run/'engine.log').exists():
-                (self.run/'engine.log').rename(self.run/f'engine-{requested}.log')
-            self.stage('fallback_launch',lambda:self.launch(image_id,fallback))
-            self.stage('fallback_health',self.health)
+            self.relaunch_at(image_id, fallback, requested)
             info['fallback_fit'] = concurrency_fit(self.engine_pool(), int(fallback['MAX_RUNNING_REQUESTS']),
                                                    context, per_stream)
             effective = fallback
@@ -369,6 +374,67 @@ class Warm:
         with self.lock:
             self.record.update(concurrency=info, config=effective); self.save()
         return effective
+
+    def relaunch_at(self, image_id, selected, previous):
+        """The one explicit fit fallback, shared with the supervised node runner."""
+        self.command(['docker','rm','-f',self.name]); self.created=False
+        if (self.run/'engine.log').exists():
+            (self.run/'engine.log').rename(self.run/f'engine-{previous}.log')
+        self.stage('fallback_launch',lambda:self.launch(image_id,selected))
+        self.stage('fallback_health',self.health)
+
+    @classmethod
+    def resume_at_64(cls, path, env):
+        """Resume a ready warm run without downloads or restarting its relay.
+
+        The caller still supplies the original rental WINDOW_END. A fresh bounded
+        launch budget cannot extend that absolute deadline.
+        """
+        path = Path(path).resolve()
+        if not path.is_relative_to((ROOT/'runs').resolve()):
+            raise ValueError('Fallback report must be inside runs')
+        record = json.loads(path.read_text())
+        if record.get('state') != 'ready' or record.get('config', {}).get('LAYOUT') != 'tp8':
+            raise ValueError('Fallback requires a ready tp8 warm report')
+        if record.get('window_end_epoch') != int(env['WINDOW_END']):
+            raise ValueError('Fallback must preserve the original WINDOW_END')
+        timeout = warm_timeout(env)
+        selected = fallback_settings(record['config'], 64)
+        if selected is None or record.get('node_run_fallback'):
+            raise ValueError('Fallback is allowed only once, from above 64')
+        image = image_reference(env)
+        require_pinned(image)
+        if image['image_ref'] != record['image_ref']:
+            raise ValueError('Fallback image differs from the running image')
+        obj = cls.__new__(cls)
+        obj.env = env
+        obj.child_env = {k: v for k, v in os.environ.items() if k != 'SAFETY_CLASSIFIER_KEY'}
+        obj.path, obj.run = path, path.with_suffix('')
+        obj.ready = obj.run/'ready.json'
+        obj.record, obj.image_meta = record, image
+        obj.name, obj.tunnel_slot = record['container'], tunnel_slot(env)
+        obj.data = load_manifest()
+        obj.weights_dir = str(Path(env.get('WEIGHTS_DIR','/mnt/nvme/models/dsv41-uncensored')).absolute())
+        obj.end = min(deadline(int(env['WINDOW_END'])), time.time()+timeout)
+        obj.deadline_bound = 'node-run fallback deadline'
+        obj.lock, obj.created, obj.relay = threading.RLock(), True, None
+        obj.secrets = secret_values(env)
+        obj.record.update(node_run_fallback=True, state='warming', deadline_epoch=obj.end)
+        obj.ready.unlink(missing_ok=True)
+        obj.save()
+        return obj, selected
+
+    def run_fallback(self, selected):
+        previous = int(self.record['config']['MAX_RUNNING_REQUESTS'])
+        self.relaunch_at(self.record['image_id'], selected, previous)
+        fit = concurrency_fit(self.engine_pool(), 64, int(selected['CONTEXT_LENGTH']),
+                              int(self.env.get('FIT_TOKENS_PER_STREAM', '32768')))
+        self.record['concurrency'].update(effective=64, fallback_fit=fit,
+                                         cuda_graph_max_bs=64, warm_graph_bs=selected['WARM_GRAPH_BS'])
+        self.record['config'] = selected
+        self.record['container_started_at'] = self.command(
+            ['docker','inspect',self.name,'--format','{{.State.StartedAt}}']).strip()
+        self.publish_ready()
 
     def publish_ready(self):
         self.remaining()
@@ -395,23 +461,38 @@ class Warm:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     add_arguments(parser)
+    parser.add_argument('--resume-at-64', type=Path, help='node-run: one fit fallback using this warm report')
     args = parser.parse_args(argv)
     env = argument_env(args, os.environ)
     if args.print_plan or env.get('DRY_RUN') == '1':
         print_plan(env, args.available_ram_gb)
         return 0
     if args.available_ram_gb is not None: parser.error('--available-ram-gb is dry-run only')
+    # Keep this secret in memory, not the inherited environment of Docker/helpers.
+    os.environ.pop('SAFETY_CLASSIFIER_KEY', None)
+    if env.get('NODE_RUN_STDIN') == '1':
+        try:
+            env['SAFETY_CLASSIFIER_KEY'] = read_classifier_key(sys.stdin)
+        except ValueError as exc:
+            print('WARM FAILED: '+str(exc), file=sys.stderr)
+            return 1
     os.umask(0o077)
     (ROOT/'runs').mkdir(exist_ok=True)
     with (ROOT/'runs/warm.lock').open('w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         try:
-            warm=Warm(env)
+            if args.resume_at_64:
+                warm, selected = Warm.resume_at_64(args.resume_at_64, env)
+            else:
+                warm=Warm(env)
         except ValueError as exc:
-            print('WARM FAILED: '+redact(str(exc),secret_values()),file=sys.stderr)
+            print('WARM FAILED: '+redact(str(exc),secret_values(env)),file=sys.stderr)
             return 1
         try:
-            warm.run_all()
+            if args.resume_at_64:
+                warm.run_fallback(selected)
+            else:
+                warm.run_all()
         except BaseException as exc:
             reason = 'timeout' if warm.timed_out(exc) else 'error'
             warm.record.update(state='failed',reason=reason,error=type(exc).__name__,end_epoch=time.time());warm.save()
