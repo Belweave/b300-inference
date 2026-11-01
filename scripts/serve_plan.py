@@ -78,7 +78,7 @@ def require_host_ram(selected, gate):
         raise ValueError(f'Host Engram requires MemAvailable >= {minimum} bytes (203 GB per replica + 32 GB headroom)')
 
 
-def build_plan(selected, image, name, weights, kit):
+def build_plan(selected, image, name, weights, kit, *, engram_flag=True):
     v = variant(selected)
     width, replicas = LAYOUTS[v['layout']]
     front = int(selected.get('ENGINE_PORT', RELAY_PORT))
@@ -86,7 +86,7 @@ def build_plan(selected, image, name, weights, kit):
     for i in range(replicas):
         port = front if v['layout'] == 'tp8' else 8100+i*100
         devices = ','.join(str(n) for n in range(i*width, (i+1)*width))
-        args = launch_args(selected, width, port)
+        args = launch_args(selected, width, port, engram_flag=engram_flag)
         if v['layout'] != 'tp8': args += ['--dist-init-addr', f'127.0.0.1:{29500+i*100}']
         processes.append({'role': 'engine', 'port': port, 'env': {'CUDA_VISIBLE_DEVICES': devices},
                           'argv_without_key': args})
@@ -101,6 +101,7 @@ def build_plan(selected, image, name, weights, kit):
               '--mount', f'type=bind,src={kit},dst=/kit,readonly',
               '--entrypoint', 'python3', image, '/kit/scripts/serve_group.py']
     return {'schema': 1, 'variant': v, 'processes': processes, 'docker_create': create,
+            'engram_config': 'flag' if engram_flag else 'image-default',
             'docker_start': ['docker', 'start', '-ai', name],
             'auth': 'Existing INFER_UPSTREAM_KEY supplied through stdin; --api-key appended inside container only'}
 

@@ -3,7 +3,7 @@ import json
 import os
 import sys
 
-def launch_args(e, width=8, port=None):
+def launch_args(e, width=8, port=None, *, engram_flag=True):
     # The tunnel front door is 127.0.0.1:8000. With the SSE relay (default) that is the
     # relay and the engine/router listens on ENGINE_PORT (8001); see scripts/sse_relay.py.
     if port is None:
@@ -18,7 +18,8 @@ def launch_args(e, width=8, port=None):
                 '--chunked-prefill-size', e['CHUNKED_PREFILL_SIZE'],
                 '--cuda-graph-max-bs-decode', e['CUDA_GRAPH_MAX_BS'],
                 '--reasoning-parser', 'deepseek-v41', '--tool-call-parser', 'deepseekv41', '--enable-metrics']
-        args += ['--engram-config', json.dumps({'placement': 'cpu' if e.get('ENGRAM', 'gpu') == 'host' else 'gpu'})]
+        if engram_flag:
+            args += ['--engram-config', json.dumps({'placement': 'cpu' if e.get('ENGRAM', 'gpu') == 'host' else 'gpu'})]
         # Pinned source and installed-image validation: docs/sglang-warm-flags.md.
         if e.get('WARM_GRAPH_BS'):
             args += ['--cuda-graph-bs-decode', *e['WARM_GRAPH_BS'].split(',')]

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -202,7 +203,6 @@ class Warm:
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         log.close()
         self.relay = proc
-        import socket
         for _ in range(100):
             self.remaining()
             if proc.poll() is not None: raise RuntimeError('SSE relay exited; see relay.log')
@@ -225,21 +225,29 @@ class Warm:
             'print(json.dumps({"version":importlib.metadata.version("sglang"),'
             '"server_args_sha256":hashlib.sha256(open(a.__file__,"rb").read()).hexdigest()}))'])
         self.record['sglang_package'] = json.loads(info.strip().splitlines()[-1])
-        plan = build_plan(selected, image, self.name, self.weights_dir, ROOT)
+        engine_help = self.command(['docker','run','--rm','--network','none','--entrypoint','python3',
+                                    image, '-m', 'sglang.launch_server', '--help'])
+        engram_flag = '--engram-config' in set(re.findall(r'--[a-z0-9-]+',engine_help))
+        if not engram_flag and selected.get('ENGRAM', 'gpu') == 'host':
+            raise ValueError('image lacks --engram-config; host Engram unsupported on this image')
+        plan = build_plan(selected, image, self.name, self.weights_dir, ROOT, engram_flag=engram_flag)
+        self.record['engram_config'] = plan['engram_config']
         # Validate all processes before allocating GPUs. The installed preview
         # must understand the exact flags and Engram schema we researched.
         for process in plan['processes']:
             args = process['argv_without_key']
-            help_text = self.command(['docker','run','--rm','--network','none','--entrypoint','python3',
-                                      image, '-m', args[2], '--help'])
+            help_text = engine_help if process['role'] == 'engine' else self.command([
+                'docker','run','--rm','--network','none','--entrypoint','python3',image, '-m', args[2], '--help'])
             required = {a for a in args if a.startswith('--')} | {'--api-key'}
             missing = sorted(required-set(re.findall(r'--[a-z0-9-]+',help_text)))
             if missing: raise ValueError('Image lacks required flags: '+','.join(missing))
             if process['role'] == 'engine':
                 code = ('import argparse,sys; from sglang.srt.server_args import ServerArgs; '
-                        'from sglang.srt.arg_groups.engram_config import EngramConfig; '
                         'p=argparse.ArgumentParser(); ServerArgs.add_cli_args(p); '
-                        'a=p.parse_args(sys.argv[1:]); EngramConfig.from_dict(a.engram_config)')
+                        'a=p.parse_args(sys.argv[1:])')
+                if engram_flag:
+                    code += ('; from sglang.srt.arg_groups.engram_config import EngramConfig; '
+                             'EngramConfig.from_dict(a.engram_config)')
             else:
                 code = ('import argparse,sys; from sglang_router.router_args import RouterArgs; '
                         'p=argparse.ArgumentParser(); RouterArgs.add_cli_args(p); p.parse_args(sys.argv[1:])')
@@ -287,7 +295,6 @@ class Warm:
         if len(names.strip().splitlines()) != 8 or not all('B300' in name for name in names.strip().splitlines()):
             raise ValueError('Warm preset requires eight B300 GPUs')
         # Refuse a warm-up on a node already serving port 8000.
-        import socket
         with socket.socket() as sock:
             sock.bind(('127.0.0.1',8000))
         mem=re.search(r'^MemAvailable:\s+(\d+) kB',Path('/proc/meminfo').read_text(),re.M)
@@ -317,6 +324,15 @@ class Warm:
             return host_gate(self.env, available)
         ram=self.stage('ram_gate',gate)
         selected=settings(self.data,self.env,ram)
+        planned = build_plan(selected, self.image_meta['image_ref'], self.name, self.weights_dir, ROOT)
+        for process in planned['processes']:
+            ports = [process['port']]
+            argv = process['argv_without_key']
+            if '--dist-init-addr' in argv:
+                ports.append(int(argv[argv.index('--dist-init-addr')+1].rsplit(':', 1)[1]))
+            for port in ports:
+                with socket.socket() as sock:
+                    sock.bind(('127.0.0.1', port))
         self.record.update(ram=ram,config=selected);self.save()
         self.stage('sse_relay',lambda:self.start_relay(selected))
         selected=self.launch_with_fit_fallback(image_id,selected)

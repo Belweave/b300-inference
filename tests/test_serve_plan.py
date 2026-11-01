@@ -391,12 +391,76 @@ class LifecycleTests(unittest.TestCase):
             obj.command=Mock(side_effect=command)
             redactor, engine = Mock(), Mock()
             redactor.pid, engine.pid = 101, 102
-            with patch('warm.subprocess.Popen',side_effect=[redactor,engine]):
+            with patch('warm.subprocess.Popen',side_effect=[redactor,engine]), patch('warm.socket.socket'):
                 obj.launch('fixture-image',config)
             self.assertEqual(len(validated),2)
+            self.assertEqual(obj.record['engram_config'],'flag')
+            self.assertEqual(sum(c.args[0][-3:] == ['-m','sglang.launch_server','--help']
+                                 for c in obj.command.call_args_list),1)
             self.assertEqual(obj.record['launch_plan'],expected)
             payload = json.loads(engine.stdin.write.call_args.args[0])
             self.assertEqual(payload['plan'],expected)
             self.assertEqual(payload['env']['INFER_UPSTREAM_KEY'],'fixture-only-key')
             self.assertNotIn('fixture-only-key',json.dumps(obj.record))
             obj.command.assert_any_call(expected['docker_create'])
+
+    def test_launch_without_engram_flag_uses_image_default_and_relaunches_at_64(self):
+        with tempfile.TemporaryDirectory() as folder, patch('warm.ROOT',Path(folder)):
+            obj = warm.Warm({'TUNNEL_SLOT':'a','WINDOW_END':str(int(time.time())+3600),
+                             'INFER_UPSTREAM_KEY':'fixture'})
+            obj.weights_dir='/fixture'
+            config = selected(LAYOUT='dep4x2')
+            config.pop('ENGRAM')  # Missing selector still defaults to GPU.
+            expected = plans.build_plan(config,'fixture-image',obj.name,obj.weights_dir,Path(folder),engram_flag=False)
+            parsed = Mock()
+
+            def command(argv):
+                if argv[-1] == '--help':
+                    return ' '.join(a for p in expected['processes'] for a in p['argv_without_key'])+' --api-key'
+                if '-c' in argv:
+                    code = argv[argv.index('-c')+1]
+                    if 'importlib.metadata' in code: return '{"version":"fixture"}'
+                    if 'ServerArgs' in code:
+                        self.assertNotIn('EngramConfig',code)
+                        self.assertNotIn('engram_config',code)
+                        self.assertNotIn('--engram-config',argv)
+                        def add_cli_args(parser):
+                            parser.parse_args = parsed
+                        modules = {
+                            'sglang.srt.server_args': SimpleNamespace(ServerArgs=SimpleNamespace(add_cli_args=add_cli_args)),
+                            'sglang.srt.arg_groups.engram_config': None}
+                        with patch.dict(sys.modules, modules), patch.object(sys,'argv',['fixture',*argv[argv.index('-c')+2:]]):
+                            exec(code, {})
+                return ''
+
+            obj.command=Mock(side_effect=command)
+            obj.health=Mock()
+            with patch('warm.subprocess.Popen',return_value=Mock(pid=101)) as popen, patch('warm.socket.socket'):
+                obj.launch('fixture-image',config)
+                self.assertEqual(obj.record['launch_plan'],expected)
+                obj.relaunch_at('fixture-image',warm.fallback_settings(config),128)
+            self.assertEqual(parsed.call_count,4)
+            self.assertEqual(sum(c.args[0][-3:] == ['-m','sglang.launch_server','--help']
+                                 for c in obj.command.call_args_list),2)
+            self.assertEqual(obj.record['engram_config'],'image-default')
+            self.assertEqual(obj.record['launch_plan']['engram_config'],'image-default')
+            for process in obj.record['launch_plan']['processes']:
+                self.assertNotIn('--engram-config',process['argv_without_key'])
+                if process['role'] == 'engine':
+                    self.assertEqual(flag(process['argv_without_key'],'--max-running-requests'),'64')
+            payload = json.loads(popen.return_value.stdin.write.call_args.args[0])
+            self.assertEqual(payload['plan'],obj.record['launch_plan'])
+            self.assertNotIn('SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE',payload['env'])
+
+    def test_launch_without_engram_flag_rejects_host_before_container_creation(self):
+        with tempfile.TemporaryDirectory() as folder, patch('warm.ROOT',Path(folder)):
+            obj = warm.Warm({'TUNNEL_SLOT':'a','WINDOW_END':str(int(time.time())+3600)})
+            obj.weights_dir='/fixture'
+            obj.command=Mock(side_effect=['{"version":"fixture"}', '--host --port --engram-config-extra'])
+            with patch('warm.subprocess.Popen') as popen:
+                with self.assertRaisesRegex(ValueError,'^image lacks --engram-config; host Engram unsupported on this image$'):
+                    obj.launch('fixture',selected(ENGRAM='host'))
+            self.assertFalse(obj.created)
+            self.assertFalse(any(c.args[0][1] in ('create','start') or '--gpus' in c.args[0]
+                                 for c in obj.command.call_args_list))
+            popen.assert_not_called()

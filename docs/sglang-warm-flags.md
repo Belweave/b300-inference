@@ -69,7 +69,10 @@ This is source evidence, not proof that a moving `dev-dsv41` tag contains it.
 The A/B renderer lives in `scripts/serve_plan.py`; engine options are centralized
 in `scripts/engine.py`. Warm checks the installed engine and router help and
 argument parsers before creating any GPU process. Engram's JSON is additionally
-validated with the installed `EngramConfig.from_dict`. Runtime compatibility
+validated with the installed `EngramConfig.from_dict` when `--engram-config` is supported.
+Older images without that flag use their default GPU Engram placement, recorded as
+`engram_config: image-default`; host Engram is rejected before GPU allocation.
+Runtime compatibility
 and memory fit are checked by load/readiness, not inferred from argument parsing.
 
 | Option / behavior | Pinned primary source |
