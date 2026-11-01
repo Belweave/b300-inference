@@ -12,11 +12,13 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 from redact import redact, secret_values
@@ -191,6 +193,7 @@ class NodeRun:
 
     def command(self, argv, timeout=30, env=None, input_text=None, check=True, merge_output=False):
         child_env = dict(self.env if env is None else env)
+        child_env['NODE_RUN_PYTHON'] = sys.executable
         for name in CREDENTIALS:
             child_env.pop(name, None)
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
@@ -320,17 +323,27 @@ class NodeRun:
         for executable in ('docker', 'nvidia-smi'):
             if not shutil.which(executable, path=self.env.get('PATH')):
                 raise GateFailure(executable+' is required')
-        try:
-            importlib.import_module('aiohttp')
-        except ImportError:
-            raise GateFailure('python dependency aiohttp is required') from None
-        # Weights come straight from R2 over S3 when MIRROR_S3_ENV_FILE loaded creds.
         import s3_mirror
+        modules = ['aiohttp', 'huggingface_hub']
         if s3_mirror.enabled(self.env):
+            modules.append('boto3')
+        for module in modules:
             try:
-                importlib.import_module('boto3')
+                importlib.import_module(module)
             except ImportError:
-                raise GateFailure('python dependency boto3 is required for S3 weights (pip install -r requirements-node.txt)') from None
+                fix = shlex.join([sys.executable, '-m', 'pip', 'install', '-r', str(ROOT/'requirements-node.txt')])
+                raise GateFailure(f'python dependency {module} is missing; run: {fix}') from None
+        import guards
+        for path in (Path(self.env['WEIGHTS_DIR']), guards.cache_dir(self.env)):
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryFile(dir=path) as probe:
+                    probe.write(b'node-run preflight\n')
+                    probe.flush()
+            except OSError:
+                fix_path = shlex.quote(str(path))
+                raise GateFailure(f'weights dir not writable: {path}; fix: '
+                                  f'sudo mkdir -p {fix_path} && sudo chown $USER {fix_path}') from None
         self.command(['docker', 'info'])
         self.engine_port = engine_port
         _, output = self.command(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'])
@@ -351,7 +364,6 @@ class NodeRun:
             # A resume relies on what is still running; a fresh run starts clean.
             self.clean_stale()
             self.ports_free((8000, engine_port, 8600, 8601))
-        import guards
         try:
             self.guard_plans = guards.plans(self.env, self.image, self.id)
         except ValueError as exc:

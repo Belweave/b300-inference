@@ -7,6 +7,10 @@ from safety import SafetyConfig
 from serve_plan import require_pinned
 
 
+def cache_dir(env):
+    return Path(env.get('GUARD_WEIGHTS_DIR', str(Path(env['WEIGHTS_DIR']).parent/'guards'))).absolute()
+
+
 def plans(env, image, run_id):
     require_pinned(image)
     config = SafetyConfig.from_env(env)
@@ -17,7 +21,7 @@ def plans(env, image, run_id):
     gpu = int(env.get('GUARD_GPU', '0'))
     if gpu < 0:
         raise ValueError('GUARD_GPU must be a GPU index')
-    cache = Path(env.get('GUARD_WEIGHTS_DIR', str(Path(env['WEIGHTS_DIR']).parent/'guards'))).absolute()
+    cache = cache_dir(env)
     result = []
     for label, model, revision, port, fraction in (
         ('shieldstral', config.model, config.model_revision, 8600, env.get('GUARD_SHIELD_MEM_FRACTION', '0.06')),

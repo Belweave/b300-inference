@@ -2,7 +2,7 @@
 # Node entrypoints only. Never source the Mac credential file in the watcher.
 set +x
 owner_only() {
-    python3 - "$1" "$2" <<'PY'
+    "${NODE_RUN_PYTHON:-python3}" - "$1" "$2" <<'PY'
 import os, stat, sys
 s = os.stat(sys.argv[1])
 if s.st_uid != os.getuid() or stat.S_IMODE(s.st_mode) != 0o600:

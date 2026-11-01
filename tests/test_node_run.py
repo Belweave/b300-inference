@@ -252,7 +252,9 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
             path = self.folder/name
             path.write_text('#!'+sys.executable+'\n'+body)
             path.chmod(0o700)
-        self.env = {'PATH': str(self.folder)+':'+os.environ['PATH'], 'HOME': str(self.folder), 'PYTHONPATH': USER_SITE,
+        (self.folder/'huggingface_hub.py').write_text('# Rehearsal dependency stub.\n')
+        self.env = {'PATH': str(self.folder)+':'+os.environ['PATH'], 'HOME': str(self.folder),
+                    'PYTHONPATH': str(self.folder)+os.pathsep+USER_SITE, 'NODE_RUN_PYTHON': sys.executable,
                     'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                     'NODE_ENV_FILE': str(tunnel_fixture(self.folder)), 'NODE_RUN_TESTING': '1',
                     'NODE_RUN_WARM_CMD': str(self.folder/'warm.sh'), 'NODE_RUN_RELAY_URL': self.url,
@@ -1107,7 +1109,7 @@ class PureNodeTests(unittest.TestCase):
                 for name, body in [('nvidia-smi', NVIDIA), ('docker', DOCKER)]:
                     (scratch/name).write_text('#!'+sys.executable+'\n'+body)
                     (scratch/name).chmod(0o700)
-                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
+                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'NODE_RUN_PYTHON': sys.executable, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                        'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1', 'FAKE_STATE': folder,
                        'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch, staged=False),
                        **cloudflared_env(scratch),
@@ -1117,7 +1119,7 @@ class PureNodeTests(unittest.TestCase):
                 with patch.dict(os.environ, env, clear=True):
                     obj = node_run.NodeRun()
                 try:
-                    with patch('node_run.socket.socket'), patch('guard_weights.fetch') as fetch, \
+                    with patch('node_run.socket.socket'), patch.dict(sys.modules, huggingface_hub=Mock()), patch('guard_weights.fetch') as fetch, \
                          patch('node_run.shutil.disk_usage', return_value=Usage(10**13, 10**13-free, int(free))), \
                          redirect_stdout(io.StringIO()):
                         with self.assertRaises(node_run.GateFailure) as caught:
@@ -1145,7 +1147,7 @@ class PureNodeTests(unittest.TestCase):
                     executable = scratch/name
                     executable.write_text('#!'+sys.executable+'\n'+body)
                     executable.chmod(0o700)
-                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
+                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'NODE_RUN_PYTHON': sys.executable, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                        'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1',
                        'NODE_RUN_WARM_CMD': str(scratch/'warm.sh'), 'FAKE_STATE': folder,
                        'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch),
@@ -1166,7 +1168,7 @@ class PureNodeTests(unittest.TestCase):
                     original_preflight = obj.preflight
 
                     def preflight():
-                        with patch('node_run.socket.socket'):
+                        with patch('node_run.socket.socket'), patch.dict(sys.modules, huggingface_hub=Mock()):
                             original_preflight()
 
                     async def measured(*args, **kwargs):
@@ -1226,7 +1228,7 @@ class PureNodeTests(unittest.TestCase):
                 for name, body in (('docker', DOCKER), ('warm.sh', WARM)):
                     (home/name).write_text('#!'+sys.executable+'\n'+body)
                     (home/name).chmod(0o700)
-                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
+                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'NODE_RUN_PYTHON': sys.executable, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                        'NODE_ENV_FILE': str(config), 'NODE_RUN_TESTING': '1', 'FAKE_STATE': folder,
                        'NODE_RUN_WARM_CMD': str(home/'warm.sh'), 'CF_TUNNEL_TOKEN': TUNNEL_TOKEN,
                        'PROVISIONED_AT': str(time.time()-100)}

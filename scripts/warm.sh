@@ -3,4 +3,6 @@
 set +x
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-exec python3 "$ROOT/scripts/warm.py" "$@"
+PYTHON=${NODE_RUN_PYTHON:-$ROOT/.venv/bin/python3}
+if [[ -z ${NODE_RUN_PYTHON:-} && ! -x $PYTHON ]]; then PYTHON=python3; fi
+exec "$PYTHON" "$ROOT/scripts/warm.py" "$@"

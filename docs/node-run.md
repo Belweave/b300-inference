@@ -1,5 +1,21 @@
 # Supervised B300 bring-up
 
+## Getting the kit onto a fresh node
+
+The repo is public, so an anonymous HTTPS clone works. Replace `<branch-or-sha>`
+with the revision you want to run:
+
+```sh
+git clone https://github.com/Belweave/b300-inference.git ~/b300-inference && cd ~/b300-inference && git checkout <branch-or-sha>
+```
+
+For a private repo, use a fine-grained read-only token scoped to this repo or a
+read-only deploy key. Supply it for the clone only, through a one-command
+credential helper or `GIT_ASKPASS`, or an SSH agent with the deploy key (`ssh -A`).
+Never store credentials in the kit, `node.env`, or the remote URL.
+
+## Running
+
 Run from the operator machine, with the existing classifier key as stdin:
 
 ```sh
@@ -87,8 +103,16 @@ with a timezone) and `CREDIT_CAP_SECONDS` (the run budget in seconds) before boo
 Neither has a default: the run window is a cost call made at launch, and boot
 stops with a clear message if either is missing. The deadline is
 `PROVISIONED_AT` + `CREDIT_CAP_SECONDS` − 600 seconds. An existing warm cutover bound reserves another 180 seconds. A
-missing upstream key or tunnel slot fails before downloads. Docker, its GPU
-runtime, Python dependencies and the checked-out kit must already be installed.
+missing upstream key or tunnel slot fails before model downloads. Docker, its GPU
+runtime, Python 3 and the checked-out kit must already be installed. The launcher
+creates `.venv` and installs `requirements-node.txt` there before reading stdin.
+It skips pip install when the requirements hash is unchanged. If venv support is
+missing, run `sudo apt-get install -y python3-venv` (`python3.12-venv` also works
+on Ubuntu 24.04), then retry.
+
+Set `NODE_RUN_PYTHON=/path/to/python3` before launching to use an interpreter with
+the dependencies already installed and skip venv management. Host helpers,
+including warm and the relay, use the same interpreter.
 
 The classifier key is read once, from the first stdin line, with CR/LF removed.
 Empty input and a terminal are refused. It is passed to warm through a pipe and
@@ -102,8 +126,11 @@ saves `runs/node-run-<UTC timestamp>.json` with timings and the evidence collect
 so far. The report includes the image digest, git SHA, warm READY signal and run
 directory, guard configuration, measurements and final decision.
 
-1. **preflight:** load node env quietly; require exactly eight B300s, Docker and
-   aiohttp; fetch and verify cloudflared (see Tunnel); clean up after earlier
+1. **preflight:** load node env quietly; check Python dependencies in the selected
+   interpreter (normally `.venv`); create and test writes in `WEIGHTS_DIR` and
+   the guard cache before any Docker command or model download. The guard cache
+   defaults to `guards` beside `WEIGHTS_DIR`, or uses `GUARD_WEIGHTS_DIR`.
+   Require exactly eight B300s and Docker; fetch and verify cloudflared (see Tunnel); clean up after earlier
    runs (see Cleanup); check ports 8000, the engine port (8001), 8600 and 8601;
    require a pinned engine image and guard revisions; check disk; then stage
    both guards. On `RESUME` the main weights disk check is skipped, as before,
@@ -187,6 +214,37 @@ stdin, probing hardware/network, or creating files. Test-only overrides require
 `NODE_RUN_WARM_CMD`, `NODE_RUN_RELAY_URL`, `NODE_RUN_GUARD_HEALTH_URL`,
 `NODE_RUN_TUNNEL_PUBLIC_URL`, `NODE_RUN_ENGINE_HEALTH_URL`, `CLOUDFLARED_BIN`,
 `CLOUDFLARED_LOG`, `CLOUDFLARED_GITHUB_URL`, `GUARD_MANIFEST`, `GUARD_HF_URL`. Do not set these on the paid node.
+
+## Watching progress
+
+`watch` needs a terminal, so request one over SSH:
+
+```sh
+ssh -t <node> watch -n5 nvidia-smi
+```
+
+Without a TTY, use the driver's own refresh loop:
+
+```sh
+ssh <node> 'nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv -l 5'
+```
+
+From another terminal, follow warm's command log or check download size. Replace
+`<warm-id>` with the current `warm-...` directory name under `runs/`, and adjust
+the weights path if you set `WEIGHTS_DIR`:
+
+```sh
+ssh <node> 'tail -F ~/b300-inference/runs/<warm-id>/operations.log'
+ssh <node> 'while sleep 10; do du -sh /mnt/nvme/models/dsv41-uncensored; done'
+```
+
+`runs/warm-<id>.json` updates at stage boundaries; transfer details are saved when
+the weights stage finishes. Engine output goes to `runs/warm-<id>/engine.log`.
+The runner saves gate timings in `runs/node-run-<timestamp>.json`; its
+`runs/node-run-<timestamp>/warm.log` is written after warm returns, so it is not
+a live download log.
+
+## Rehearsal
 
 The offline default of `safety_loadtest.py` remains available. Its live CLI is
 `python3 scripts/safety_loadtest.py --url http://127.0.0.1:8000 --json`, with the
