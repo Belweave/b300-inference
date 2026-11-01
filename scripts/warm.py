@@ -262,12 +262,13 @@ class Warm:
         self.record['container']=self.name
         with (self.run/'engine.log').open('ab') as log:
             redactor=subprocess.Popen([sys.executable,str(ROOT/'scripts/redact.py')],stdin=subprocess.PIPE,
-                                      stdout=log,stderr=subprocess.DEVNULL,start_new_session=True,env=self.child_env)
+                                      stdout=log,stderr=(self.run/'redact.err').open('ab'),start_new_session=True,env=self.child_env)
             engine=subprocess.Popen(plan['docker_start'],stdin=subprocess.PIPE,stdout=redactor.stdin,
                                     stderr=subprocess.STDOUT,start_new_session=True,env=self.child_env)
             redactor.stdin.close()
             engine.stdin.write((json.dumps({'plan':plan,'env':{**selected,'INFER_UPSTREAM_KEY':self.env['INFER_UPSTREAM_KEY']}})+'\n').encode())
             engine.stdin.close()
+        self.engine_proc=engine
         self.record['capture_pids']=[engine.pid,redactor.pid]; self.save()
 
     def health(self):
@@ -280,12 +281,24 @@ class Warm:
                     check(f'http://127.0.0.1:{RELAY_PORT}', self.env['INFER_UPSTREAM_KEY'], self.data['model']['repo'])
                 break
             except Exception:
-                state=self.command(['docker','inspect',self.name,'--format','{{.State.Running}}']).strip()
-                if state != 'true': raise EngineStopped('Engine stopped before health')
+                # docker start -ai returns before the container leaves 'created'; that is not a stop.
+                state=self.command(['docker','inspect',self.name,'--format','{{.State.Status}}']).strip()
+                attached=getattr(self,'engine_proc',None)
+                if state not in ('created','running','restarting') or (attached is not None and attached.poll() is not None):
+                    self.record_exit(); raise EngineStopped('Engine stopped before health')
                 time.sleep(min(2,self.remaining()))
         benign = self.env.get('NODE_RUN_BENIGN_SMOKE') == '1'
         self.completion([{'role':'user','content':'hello world' if benign else 'Reply hi.'}])
         self.completion([{'role':'user','content':'hello world' if benign else 'Count to three.'}],32,True)
+
+    def record_exit(self):
+        try:
+            state=self.command(['docker','inspect',self.name,'--format',
+                                '{{json .State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{json .State.Error}}'])
+        except Exception:
+            return
+        with self.lock:
+            self.record['engine_exit']=redact(state.strip(),self.secrets); self.save()
 
     def run_all(self):
         self.remaining()

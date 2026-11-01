@@ -360,6 +360,22 @@ class LifecycleTests(unittest.TestCase):
                 obj.health()
             self.assertEqual(check.call_args_list[-1].args[0],'http://127.0.0.1:8000')
 
+    def test_health_waits_while_container_is_still_created(self):
+        with tempfile.TemporaryDirectory() as folder, patch('warm.ROOT',Path(folder)):
+            obj = warm.Warm({'TUNNEL_SLOT':'a','WINDOW_END':str(int(time.time())+3600),
+                             'INFER_UPSTREAM_KEY':'fixture'})
+            obj.record['launch_plan'] = {'processes':[{'port':8001}]}
+            obj.relay = None
+            obj.engine_proc = Mock(poll=Mock(return_value=None))
+            obj.command = Mock(return_value='created\n')
+            obj.completion = Mock()
+            with patch('warm.check',side_effect=[OSError('refused'),None]), patch('warm.time.sleep'):
+                obj.health()
+            obj.command = Mock(side_effect=['exited\n','"exited" 1 false ""\n'])
+            with patch('warm.check',side_effect=OSError('refused')), self.assertRaises(warm.EngineStopped):
+                obj.health()
+            self.assertEqual(obj.record['engine_exit'],'"exited" 1 false ""')
+
     def test_launch_validates_parsed_engram_dict_and_delivers_plan_over_stdin(self):
         with tempfile.TemporaryDirectory() as folder, patch('warm.ROOT',Path(folder)):
             obj = warm.Warm({'TUNNEL_SLOT':'a','WINDOW_END':str(int(time.time())+3600),
