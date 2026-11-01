@@ -117,10 +117,11 @@ loads, remote 101 GB shards or cross-device copies can exceed it even at 10 Gbit
 
 ## Gateway contract
 
-Client API base: `https://api.infer.belweave.ai/v1` (host
-`https://api.infer.belweave.ai`, base path `/v1`). `infer.belweave.tech` is a
-deprecated alias kept working during migration until clients move over.
-Netops owns DNS and Worker routing for both hosts; the origin tunnel is unchanged.
+The **only API base** is `https://api.infer.belweave.ai/v1` (host
+`https://api.infer.belweave.ai`, base path `/v1`). Netops confirms it is live
+and returns HTTP 401 without a key. `infer.belweave.tech` was retired as the
+API host on Nov 1, 2026; it now serves the marketing site, not the API.
+Netops owns DNS and Worker routing; the origin tunnel is unchanged.
 
 Success atomically writes `runs/warm-<id>/ready.json` and prints one
 `READY <JSON>` line. Schema 1 contains `state`, `model`, `revision`, `ready_epoch`,

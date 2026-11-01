@@ -69,10 +69,11 @@ it yourself. Do not put secrets in launchd `EnvironmentVariables`.
 
 ## Network modes and handoff
 
-Client API base: `https://api.infer.belweave.ai/v1` (host
-`https://api.infer.belweave.ai`, base path `/v1`). `infer.belweave.tech` is a
-deprecated alias kept working during migration until clients move over.
-Netops owns DNS and Worker routing for both hosts.
+The **only API base** is `https://api.infer.belweave.ai/v1` (host
+`https://api.infer.belweave.ai`, base path `/v1`). Netops confirms it is live
+and returns HTTP 401 without a key. `infer.belweave.tech` was retired as the
+API host on Nov 1, 2026; it now serves the marketing site, not the API.
+Netops owns DNS and Worker routing.
 
 ```text
 api.infer.belweave.ai Worker (client keys, limits, between-window 503)
