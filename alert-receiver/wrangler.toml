@@ -5,7 +5,6 @@ compatibility_date = "2026-10-01"
 workers_dev = false
 
 [vars]
-NOTIFY_API_ORIGIN = "https://notify.belweave.ai"
 REPLAY_WINDOW_S = "300"
 MAX_ATTEMPTS = "12"
 
@@ -19,6 +18,5 @@ new_sqlite_classes = ["AlertLedger"]
 
 # Secrets only; never put their values here:
 # NOTIFY_WEBHOOK_SECRET
-# NOTIFY_API_TOKEN
-# NOTIFY_DEVICE_ID (optional)
-# Netops must choose the route/hostname before deployment.
+# NOTIFY_ALERT_WEBHOOK_URL (secret URL, contains a token)
+# Planned (Netops, at approved deploy): routes = [{ pattern = "safety-alert.belweave.tech", custom_domain = true }]

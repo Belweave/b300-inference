@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import worker, { AlertLedger } from "../src/index.js";
 
 const SECRET = "test-secret-a";
-const TOKEN = "test-agent-token";
+const WEBHOOK_URL = "https://notify.invalid/hooks/test-hook-token";
 const START = 1_800_000_000_000;
 let logs;
 
@@ -46,14 +46,13 @@ function signature(body, timestamp, secret = SECRET) {
   return `v1=${createHmac("sha256", secret).update(`v1:${timestamp}:`).update(body).digest("hex")}`;
 }
 
-function harness(t, overrides = {}, notify = () => Response.json({ id: "test-notification-id" }, { status: 201 })) {
+function harness(t, overrides = {}, notify = () => Response.json({ ok: true, eventId: "evt_test", delivered: 1 })) {
   let clock = START;
   const calls = [];
   const objects = new Map();
   const env = {
     NOTIFY_WEBHOOK_SECRET: SECRET,
-    NOTIFY_API_TOKEN: TOKEN,
-    NOTIFY_DEVICE_ID: "test-device",
+    NOTIFY_ALERT_WEBHOOK_URL: WEBHOOK_URL,
     NOW: () => clock,
     ...overrides,
   };
@@ -121,17 +120,16 @@ test("valid signature queues once and sends only the fixed notification fields",
     assert.equal(pending.status, "pending");
     assert.equal(pending.attempts, 1);
     assert.notEqual(await h.objects.get(incident).storage.getAlarm(), null);
-    return Response.json({ id: "test-notification-id" }, { status: 201 });
+    return Response.json({ ok: true, eventId: "evt_test", delivered: 1 });
   });
   const response = await h.post(body, { headers: { "X-Test-Marker": "inert-request-marker" } });
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), { incident, status: "sent" });
   assert.equal(h.calls.length, 1);
   const call = h.calls[0];
-  assert.equal(call.url, "https://notify.belweave.ai/api/agent/notifications");
+  assert.equal(call.url, h.env.NOTIFY_ALERT_WEBHOOK_URL);
   assert.equal(call.method, "POST");
   assert.deepEqual(call.headers, {
-    Authorization: `Bearer ${TOKEN}`,
     "Content-Type": "application/json",
     "Idempotency-Key": `b300-safety-${incident}`,
   });
@@ -144,11 +142,13 @@ test("valid signature queues once and sends only the fixed notification fields",
       `The offending key was revoked automatically and sealed evidence is in the b300-evidence bucket under incidents/${incident}.json. ` +
       "Report to NCMEC's CyberTipline (https://report.cybertip.org/) as required by 18 U.S.C. 2258A. " +
       "Do not open or share the evidence outside the reporting process.",
-    project: "B300 safety", deviceIds: ["test-device"],
+    project: "B300 safety",
   });
+  assert.deepEqual(Object.keys(JSON.parse(call.body)), ["title", "summary", "body", "project"]);
+  assert.equal(call.body.includes("deviceIds"), false);
   assert.deepEqual(await h.record(incident), {
     incident, status: "sent", attempts: 1, first_seen: START,
-    notified_at: START, notification_id: "test-notification-id",
+    notified_at: START, notification_id: "evt_test",
   });
   const initial = h.objects.get(incident).storage.writes[0];
   assert.equal(initial.status, "pending");
@@ -156,16 +156,36 @@ test("valid signature queues once and sends only the fixed notification fields",
   assert.equal(await h.objects.get(incident).storage.getAlarm(), null);
 });
 
-test("unset device uses account defaults and origin is configurable", async (t) => {
-  const h = harness(t, { NOTIFY_DEVICE_ID: undefined, NOTIFY_API_ORIGIN: "https://notify.invalid/" });
+test("configured webhook URL is used verbatim", async (t) => {
+  const url = "https://notify.invalid/hooks/other-test-token?mode=alert";
+  const h = harness(t, { NOTIFY_ALERT_WEBHOOK_URL: url });
   assert.equal((await h.post()).status, 202);
-  assert.equal(h.calls[0].url, "https://notify.invalid/api/agent/notifications");
-  assert.equal(Object.hasOwn(JSON.parse(h.calls[0].body), "deviceIds"), false);
+  assert.equal(h.calls[0].url, url);
 });
 
-for (const status of [200, 202, 204]) {
+for (const status of [200, 201, 202, 204, 299]) {
   test(`Notify ${status} with no notification id is success`, async (t) => {
     const h = harness(t, {}, () => new Response(null, { status }));
+    const incident = randomUUID();
+    assert.equal((await (await h.post(JSON.stringify({ incident }))).json()).status, "sent");
+    assert.equal(Object.hasOwn(await h.record(incident), "notification_id"), false);
+  });
+}
+
+test("Notify 202 counts as sent and stores eventId privately", async (t) => {
+  const h = harness(t, {}, () => Response.json({ ok: true, eventId: "evt_processing", delivered: 1 }, { status: 202 }));
+  const incident = randomUUID();
+  const body = JSON.stringify({ incident });
+  assert.deepEqual(await (await h.post(body)).json(), { incident, status: "sent" });
+  assert.equal((await h.record(incident)).notification_id, "evt_processing");
+  assert.equal(await h.objects.get(incident).storage.getAlarm(), null);
+  assert.deepEqual(await (await h.post(body)).json(), { incident, status: "sent" });
+  assert.equal(h.calls.length, 1);
+});
+
+for (const eventId of [null, 42, true, {}, []]) {
+  test(`non-string eventId ${JSON.stringify(eventId)} is not stored`, async (t) => {
+    const h = harness(t, {}, () => Response.json({ ok: true, eventId, delivered: 1 }));
     const incident = randomUUID();
     assert.equal((await (await h.post(JSON.stringify({ incident }))).json()).status, "sent");
     assert.equal(Object.hasOwn(await h.record(incident), "notification_id"), false);
@@ -205,7 +225,7 @@ for (const [name, options] of authCases) {
 test("legacy bearer auth alone is never accepted", async (t) => {
   const h = harness(t);
   await expectError(await h.post(undefined, { headers: {
-    Authorization: `Bearer ${TOKEN}`, "X-Safety-Timestamp": null, "X-Safety-Signature": null,
+    Authorization: "Bearer inert-legacy-credential", "X-Safety-Timestamp": null, "X-Safety-Signature": null,
   } }), 401, "unauthorized");
 });
 
@@ -345,6 +365,42 @@ for (const [name, secret] of [
   });
 }
 
+for (const [name, url] of [
+  ["unset", undefined], ["empty", ""], ["whitespace", " "], ["malformed", "test-hook-token"],
+  ["non-string", 42], ["non-https", "http://notify.invalid/hooks/test-hook-token"],
+  ["credentialed", "https://u:p@notify.invalid/hooks/test-hook-token"],
+  ["username only", "https://u@notify.invalid/hooks/test-hook-token"],
+  ["password only", "https://:p@notify.invalid/hooks/test-hook-token"],
+]) {
+  test(`${name} webhook URL fails closed on every route without touching the ledger`, async (t) => {
+    const h = harness(t, { NOTIFY_ALERT_WEBHOOK_URL: url });
+    const ledgerId = t.mock.method(h.env.LEDGER, "idFromName");
+    const ledgerGet = t.mock.method(h.env.LEDGER, "get");
+    const responses = [];
+    for (const options of [{}, { method: "GET" },
+      { url: "https://receiver.invalid/unknown" }, { url: "https://receiver.invalid/health" },
+      { method: "GET", url: "https://receiver.invalid/health" }]) {
+      const response = await h.post(undefined, options);
+      assert.equal(response.status, 503);
+      const body = await response.text();
+      assert.equal(body, '{"error":"unavailable"}');
+      responses.push(body);
+    }
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.objects.size, 0);
+    assert.equal(ledgerId.mock.callCount(), 0);
+    assert.equal(ledgerGet.mock.callCount(), 0);
+    assert.equal(logs.length, responses.length);
+    for (const { level, args } of logs) {
+      assert.equal(level, "error");
+      assert.deepEqual(args, [JSON.stringify({ event: "rejected", reason: "notify_unconfigured" })]);
+    }
+    const output = [...logs.flatMap(({ args }) => args), ...responses].join("\n");
+    assert.equal(output.includes("test-hook-token"), false);
+    if (typeof url === "string" && url) assert.equal(output.includes(url), false);
+  });
+}
+
 test("repeated incident remains deduplicated after object reconstruction", async (t) => {
   const h = harness(t);
   const incident = randomUUID();
@@ -364,7 +420,7 @@ test("concurrent double POST sends once while Notify is in flight", async (t) =>
   const h = harness(t, {}, async () => {
     entered.resolve();
     await release.promise;
-    return Response.json({ id: "test-notification-id" }, { status: 201 });
+    return Response.json({ ok: true, eventId: "evt_test", delivered: 1 });
   });
   const body = JSON.stringify({ incident: randomUUID() });
   const first = h.post(body);
@@ -395,17 +451,18 @@ test("Notify 500 stays pending, duplicate POST does not retry, and alarm succeed
   assert.equal((await h.record(incident)).status, "sent");
   assert.equal((await h.record(incident)).notified_at, START + 30_000);
   assert.equal(h.calls[0].headers["Idempotency-Key"], h.calls[1].headers["Idempotency-Key"]);
+  assert.equal(h.calls[0].body, h.calls[1].body);
 });
 
-for (const status of [400, 401, 403, 404, 429, 503, 302]) {
-  test(`Notify ${status} is retried${status < 405 && status >= 400 ? " and logged as a config error" : ""}`, async (t) => {
+for (const status of [400, 401, 403, 404, 409, 429, 502, 503, 302]) {
+  test(`Notify ${status} is retried${[400, 404, 409].includes(status) ? " and logged as a config error" : ""}`, async (t) => {
     const h = harness(t, {}, () => new Response(null, { status }));
     const incident = randomUUID();
     await h.post(JSON.stringify({ incident }));
     assert.equal((await h.record(incident)).status, "pending");
     await h.alarm(incident);
     assert.equal(h.calls.length, 2);
-    const event = [400, 401, 403, 404].includes(status) ? "notify_config_error" : "notify_failed";
+    const event = [400, 404, 409].includes(status) ? "notify_config_error" : "notify_failed";
     assert.equal(JSON.parse(logs[0].args[0]).event, event);
     assert.equal(logs[0].level, "error");
   });
@@ -473,16 +530,34 @@ test("MAX_ATTEMPTS includes the immediate attempt", async (t) => {
   assert.equal(await h.objects.get(incident).storage.getAlarm(), null);
 });
 
-test("missing Notify token persists pending work and retries after config is fixed", async (t) => {
-  const h = harness(t, { NOTIFY_API_TOKEN: "" });
+test("webhook URL removed after accept persists pending work and retries after config is fixed", async (t) => {
+  const h = harness(t);
   const incident = randomUUID();
-  await h.post(JSON.stringify({ incident }));
+  h.env.LEDGER.get(incident);
+  const { storage } = h.objects.get(incident);
+  t.mock.method(storage, "put", async (key, record) => {
+    await MemoryStorage.prototype.put.call(storage, key, record);
+    if (record.attempts === 0) delete h.env.NOTIFY_ALERT_WEBHOOK_URL;
+  });
+  const response = await h.post(JSON.stringify({ incident }));
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { incident, status: "queued" });
   assert.equal(h.calls.length, 0);
   assert.equal((await h.record(incident)).status, "pending");
-  assert.equal(JSON.parse(logs[0].args[0]).event, "notify_config_error");
-  h.env.NOTIFY_API_TOKEN = TOKEN;
+  assert.deepEqual(JSON.parse(logs[0].args[0]), { event: "notify_config_error", incident, attempt: 1, status: "config" });
+  assert.equal(logs[0].level, "error");
+  assert.equal(await storage.getAlarm(), START + 30_000);
+  h.restart(incident);
+  await h.alarm(incident);
+  assert.equal(h.calls.length, 0);
+  assert.equal((await h.record(incident)).status, "pending");
+  assert.equal(JSON.parse(logs[1].args[0]).event, "notify_config_error");
+  h.env.NOTIFY_ALERT_WEBHOOK_URL = WEBHOOK_URL;
   await h.alarm(incident);
   assert.equal((await h.record(incident)).status, "sent");
+  assert.equal((await h.record(incident)).notification_id, "evt_test");
+  assert.equal(h.calls.length, 1);
+  assert.equal(await storage.getAlarm(), null);
 });
 
 test("a duplicate alarm before the retry time does not send early", async (t) => {
@@ -522,28 +597,53 @@ test("recovery after an interrupted last attempt marks failed without exceeding 
 });
 
 test("logs contain only structured allowlisted metadata and validated incidents", async (t) => {
-  const h = harness(t, { MAX_ATTEMPTS: "2" }, (_url, _init, count) => {
-    if (count <= 2) throw new Error(`${SECRET} ${TOKEN} inert-private-marker`);
-    return Response.json({ id: "inert-notification-id" }, { status: 201 });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const entered = Promise.withResolvers();
+  const privateText = `${SECRET} ${WEBHOOK_URL} inert-private-marker`;
+  const h = harness(t, { MAX_ATTEMPTS: "2" }, (_url, init, count) => {
+    if (count === 1) throw new Error(privateText);
+    if (count === 2) return Response.json({ error: privateText }, { status: 502 });
+    if (count === 3) return new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(new Error(privateText)), { once: true });
+      entered.resolve();
+    });
+    return Response.json({ ok: true, eventId: "inert-event-id", delivered: 1, debug: privateText });
   });
   const incident = randomUUID();
   const body = JSON.stringify({ incident });
   const signed = signature(body, String(START / 1000));
-  await h.post(body);
+  const responses = [await (await h.post(body)).text()];
   await h.alarm(incident);
+  responses.push(await (await h.post(body)).text());
   const next = randomUUID();
-  await h.post(JSON.stringify({ incident: next }));
-  await h.post(JSON.stringify({ incident: "inert-invalid-incident", extra: "inert-marker" }));
-  await h.post(body, { signature: `v1=${"0".repeat(64)}` });
-  const text = logs.map(({ args }) => args.join(" ")).join("\n");
-  for (const forbidden of [SECRET, TOKEN, signed, body, "inert-private-marker", "inert-invalid-incident", "inert-marker", "inert-notification-id"]) {
-    assert.equal(text.includes(forbidden), false);
+  const nextBody = JSON.stringify({ incident: next });
+  const timed = h.post(nextBody);
+  await entered.promise;
+  t.mock.timers.tick(10_000);
+  responses.push(await (await timed).text());
+  await h.alarm(next);
+  responses.push(await (await h.post(nextBody)).text());
+  responses.push(await (await h.post(JSON.stringify({ incident: "inert-invalid-incident", extra: "inert-marker" }))).text());
+  responses.push(await (await h.post(body, { signature: `v1=${"0".repeat(64)}` })).text());
+  const output = [...logs.flatMap(({ args }) => args), ...responses].join("\n");
+  for (const forbidden of [SECRET, WEBHOOK_URL, "test-hook-token", signed, body,
+    "inert-private-marker", "inert-invalid-incident", "inert-marker", "inert-event-id"]) {
+    assert.equal(output.includes(forbidden), false);
   }
+  assert.deepEqual(logs.map(({ args }) => JSON.parse(args[0]).event), [
+    "notify_failed", "notify_failed", "notify_gave_up", "notify_failed", "notify_sent", "rejected", "rejected",
+  ]);
+  assert.equal(JSON.parse(logs[3].args[0]).status, "timeout");
   for (const { args } of logs) {
     assert.equal(args.length, 1);
     const entry = JSON.parse(args[0]);
     assert.ok(Object.keys(entry).every((key) => ["event", "reason", "incident", "attempt", "status"].includes(key)));
     if (entry.incident) assert.ok([incident, next].includes(entry.incident));
+  }
+  for (const { storage } of h.objects.values()) {
+    const records = JSON.stringify(storage.writes);
+    assert.equal(records.includes(WEBHOOK_URL), false);
+    assert.equal(records.includes("test-hook-token"), false);
   }
 });
 

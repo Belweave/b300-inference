@@ -24,6 +24,16 @@ function secrets(value) {
   return parts.length <= 2 && parts.every((part) => part.length > 0 && !/\s/.test(part)) ? parts : null;
 }
 
+function webhookUrl(value) {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 async function readBody(request) {
   const bytes = new Uint8Array(BODY_LIMIT);
   let length = 0;
@@ -68,6 +78,7 @@ async function authenticated(request, env, raw, keys) {
 
 export default {
   async fetch(request, env) {
+    if (!webhookUrl(env.NOTIFY_ALERT_WEBHOOK_URL)) return rejected(503, "unavailable", "notify_unconfigured");
     const keys = secrets(env.NOTIFY_WEBHOOK_SECRET);
     if (!keys) return rejected(503, "unavailable");
     const path = new URL(request.url).pathname;
@@ -111,7 +122,7 @@ export default {
   },
 };
 
-function notification(incident, device) {
+function notification(incident) {
   return {
     title: "Child-safety block fired",
     summary: `Incident ${incident}. File a CyberTipline report.`,
@@ -120,7 +131,6 @@ function notification(incident, device) {
       "Report to NCMEC's CyberTipline (https://report.cybertip.org/) as required by 18 U.S.C. 2258A. " +
       "Do not open or share the evidence outside the reporting process.",
     project: "B300 safety",
-    ...(device ? { deviceIds: [device] } : {}),
   };
 }
 
@@ -200,7 +210,7 @@ export class AlertLedger {
       await this.save(record);
       console.log(JSON.stringify({ event: "notify_sent", ...log }));
     } else {
-      const configError = [400, 401, 403, 404, "config"].includes(result.status);
+      const configError = [400, 404, 409, "config"].includes(result.status);
       console.error(JSON.stringify({ event: configError ? "notify_config_error" : "notify_failed", ...log }));
       if (record.attempts >= maximum) return this.giveUp(record);
       record.retry_at = now(this.env) + delay;
@@ -209,19 +219,18 @@ export class AlertLedger {
   }
 
   async deliver(incident) {
-    if (!this.env.NOTIFY_API_TOKEN) return { ok: false, status: "config" };
+    const url = webhookUrl(this.env.NOTIFY_ALERT_WEBHOOK_URL);
+    if (!url) return { ok: false, status: "config" };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
-      const origin = (this.env.NOTIFY_API_ORIGIN || "https://notify.belweave.ai").replace(/\/$/, "");
-      const response = await fetch(`${origin}/api/agent/notifications`, {
+      const response = await fetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.env.NOTIFY_API_TOKEN}`,
           "Idempotency-Key": `b300-safety-${incident}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(notification(incident, this.env.NOTIFY_DEVICE_ID)),
+        body: JSON.stringify(notification(incident)),
         signal: controller.signal,
         redirect: "manual",
       });
@@ -230,7 +239,7 @@ export class AlertLedger {
         return { ok: false, status: response.status };
       }
       const data = await response.json().catch(() => null);
-      const id = data?.id;
+      const id = data?.eventId;
       return { ok: true, status: response.status, ...(typeof id === "string" ? { id } : {}) };
     } catch {
       return { ok: false, status: controller.signal.aborted ? "timeout" : "network" };

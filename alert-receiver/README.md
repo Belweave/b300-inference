@@ -1,41 +1,39 @@
 # Draft safety alert receiver
 
-A small, dependency-free Cloudflare Worker for incident-only alerts from the B300 inference gateway. It runs separately from the B300 node, so a node outage does not stop alert delivery. Nothing has been deployed. This draft does not change the gateway.
+A dependency-free Cloudflare Worker for incident-only alerts from the B300 inference gateway. It runs separately from the B300 node, so a node outage does not stop accepted alerts from being delivered. Nothing has been deployed.
 
-## Signature proposal for Netops
+## Gateway contract
 
-The gateway currently sends a bearer token, fire-and-forget. This receiver requires HMAC instead and will reject that existing request. Netops must agree to and implement this proposal before use.
-
-POST `/alert` with `Content-Type: application/json` and exactly `{"incident":"<lowercase-v4-uuid>"}`. Sign the exact UTF-8 body bytes, including any whitespace:
+POST `/alert` with `Content-Type: application/json` and exactly `{"incident":"<lowercase-v4-uuid>"}`. Sign the exact UTF-8 body bytes, including whitespace:
 
 - `X-Safety-Timestamp`: Unix seconds, ASCII digits only.
 - `X-Safety-Signature`: `v1=` followed by the lowercase hex HMAC-SHA256 of `v1:<timestamp>:<rawBody>`, keyed by `NOTIFY_WEBHOOK_SECRET`.
 
-Proposed gateway change, where `incident` comes from `crypto.randomUUID()`:
+The replay window defaults to ±300 seconds, inclusive, set by `REPLAY_WINDOW_S`. The receiver accepts one secret or two separated by exactly one space. To rotate, install both on the receiver, switch the gateway to the new single secret, then remove the old receiver secret after the replay window and outstanding gateway retries.
 
-```js
-const body = JSON.stringify({ incident }), ts = String(Math.floor(Date.now() / 1000)), enc = new TextEncoder();
-const key = await crypto.subtle.importKey("raw", enc.encode(env.NOTIFY_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-const mac = await crypto.subtle.sign("HMAC", key, enc.encode(`v1:${ts}:${body}`));
-const signature = "v1=" + Array.from(new Uint8Array(mac), b => b.toString(16).padStart(2, "0")).join("");
-const response = await fetch(env.NOTIFY_WEBHOOK, { method: "POST", headers: { "Content-Type": "application/json", "X-Safety-Timestamp": ts, "X-Safety-Signature": signature }, body });
-```
+WebCrypto verifies the HMAC before JSON parsing. Authentication failures return 401 `{"error":"unauthorized"}`. Missing, empty, or malformed shared-secret configuration returns 503 `{"error":"unavailable"}` on every route, including `/health`.
 
-Netops should keep delivery alive with `ctx.waitUntil` and retry network failures or non-2xx responses a few times with backoff. Keep the same incident and body; refresh the timestamp and signature for each attempt. Receiver retries only start after it has durably accepted an incident; they cannot recover a gateway request that never arrived.
-
-The default replay window is ±300 seconds, inclusive, set by `REPLAY_WINDOW_S`. The receiver accepts one secret or two separated by exactly one space. For rotation, install both on the receiver, switch the gateway to the new single secret, then remove the old receiver secret after the replay window and outstanding gateway retries. Verification uses WebCrypto HMAC verification over bytes before JSON parsing. All authentication failures return the same 401 body. Missing, empty, or malformed secret configuration returns 503 on every route, including health.
+Netops implemented signing and five delivery attempts with 1, 2, 4, and 8 second retry backoffs inside `waitUntil`, plus an `alert_gave_up` log, in Belweave/infer-gateway PR #1 at `49aadcd`. Netops cross-checked the gateway's real sender against this receiver's `authenticated()`. Receiver retries only start after durable acceptance; they cannot recover a gateway request that never arrived.
 
 ## Behaviour
 
-Bodies are limited to 256 bytes, checked against both Content-Length and the stream. Invalid JSON or incident fields return 400; an oversized body returns 413; non-JSON content type returns 415. Only POST `/alert` is accepted (other methods: 405; unknown paths: 404). GET `/health` returns only `{"ok":true}`.
+Bodies are limited to 256 bytes, checked against both Content-Length and the stream. Invalid JSON or incident fields return 400; oversized bodies return 413; non-JSON content types return 415. Only POST `/alert` is accepted (other methods: 405; unknown paths: 404). GET `/health` returns `{"ok":true}` when configured.
 
-One `AlertLedger` Durable Object per incident stores pending work before trying Notify immediately. A new incident returns 202 with `sent` or `queued`; a duplicate returns 200 with its current `pending`, `sent`, or `failed` status and does not send again. Ledger entries are retained for deduplication. Stored `first_seen` and `notified_at` timestamps are Unix milliseconds.
+One `AlertLedger` Durable Object per incident stores pending work before trying Notify immediately. A new incident returns 202 with `sent` or `queued`; a duplicate returns 200 with its current `pending`, `sent`, or `failed` status without sending again. Ledger entries are retained for deduplication. Stored `first_seen` and `notified_at` timestamps are Unix milliseconds.
 
-Each Notify attempt has a ten-second timeout. Failures retry by alarm after 30 seconds, 60 seconds, 2 minutes, 4 minutes, and so on, capped at 30 minutes per delay. `MAX_ATTEMPTS` defaults to 12, including the immediate attempt. All non-2xx responses retry, including configuration errors (400/401/403/404), which produce an error log. Exhaustion persists `failed` and emits `notify_gave_up` at error level; fixing configuration alone does not restart a failed incident.
+Each Notify attempt has a ten-second timeout and does not follow redirects. Failures retry by alarm after 30 seconds, 60 seconds, 2 minutes, 4 minutes, and so on, capped at 30 minutes per delay. `MAX_ATTEMPTS` defaults to 12, including the immediate attempt. All non-2xx responses retry. Responses 400, 404, and 409, or missing/invalid webhook configuration inside the ledger, log `notify_config_error`; other failures log `notify_failed`. Exhaustion persists `failed` and logs `notify_gave_up` at error level. Fixing configuration alone does not restart a failed incident.
 
-The ledger serializes POSTs and alarms. It saves attempt state and a recovery alarm together before contacting Notify. A restart during a delivery can repeat that delivery with the same `Idempotency-Key: b300-safety-<incident>`; Notify must honour that key to avoid a duplicate in this case. Any 2xx marks the incident sent; a response JSON `id`, when present, is stored privately.
+The ledger serializes POSTs and alarms. It saves attempt state and a recovery alarm together before contacting Notify. Notify's webhook API honours `Idempotency-Key: b300-safety-<incident>`. Every attempt for an incident sends identical payload bytes, including after a restart. Any 2xx, including 202, marks the incident sent and logs `notify_sent`. A string `eventId` is stored privately as `notification_id`.
 
-Notify receives only the fixed reporting instructions and incident ID. No request content or key name is forwarded. `NOTIFY_DEVICE_ID` selects Preetham's iPhone; omitting it uses the defaults of Preetham's own account, whose agent token is used. Logs contain only structured event metadata and validated incident IDs, never credentials, signatures, request bodies, or Notify response bodies.
+The outbound JSON has exactly four fields: `title` ("Child-safety block fired"), `summary` (incident ID and a CyberTipline reminder), `body` (the fixed reporting instructions), and `project` ("B300 safety"). The body includes the incident ID, automatic key revocation, sealed evidence in `b300-evidence` under `incidents/<id>.json`, and reporting to NCMEC's CyberTipline at https://report.cybertip.org/ under 18 U.S.C. 2258A. It contains no request content or key name. Without `deviceIds`, Notify fans out to the account's active devices; Preetham's iPhone is currently the only one.
+
+Logs contain only structured event metadata and validated incident IDs, never credentials, signatures, request bodies, exception text, or Notify response bodies.
+
+## Notify webhook
+
+`NOTIFY_ALERT_WEBHOOK_URL` is the Notify webhook service URL for service "B300 CSAM alert". The receiver posts JSON to `/hooks/:token` with only `Content-Type` and `Idempotency-Key` headers. The URL token is the credential; there is no Authorization header.
+
+Treat the URL as a secret: it is never logged, returned, or stored in ledger records. If it leaks, rotate it with Notify's service rotate, then update the receiver secret. The URL must parse, use HTTPS, and contain no username or password. Missing, empty, or invalid configuration returns 503 `{"error":"unavailable"}` on every route before touching the ledger and logs `{"event":"rejected","reason":"notify_unconfigured"}` at error level. If configuration disappears after acceptance, pending work remains on the alarm retry path.
 
 ## Local tests and signing helper
 
@@ -53,20 +51,21 @@ body=$(node -e 'console.log(JSON.stringify({incident:crypto.randomUUID()}))')
 node alert-receiver/tools/sign.mjs "$body"
 ```
 
-Send exactly those body bytes during an approved drill, without adding a newline. The helper intentionally prints a signature for the drill; the receiver never logs signatures.
+Send exactly those body bytes during an approved drill, without adding a newline. The helper prints a signature for the drill; the receiver never logs signatures.
 
-## Deploy (needs Preetham's approval, not done)
+## Deploy (needs approval, not done)
 
-These are future steps, not actions taken by this draft:
+The planned route is a Worker custom domain, `safety-alert.belweave.tech`, on the `belweave.tech` zone. `workers_dev` is off; the route is only a comment in `wrangler.toml`.
 
-1. On Preetham's machine, generate a shared secret with `openssl rand -hex 32`. Set it with `wrangler secret put NOTIFY_WEBHOOK_SECRET` in both the receiver and gateway Worker projects. Keep it out of files and command arguments.
-2. Create a Notify agent token in Preetham's own account with only `notifications:send`; set `NOTIFY_API_TOKEN` using `wrangler secret put NOTIFY_API_TOKEN` in the receiver project. Pick his iPhone device ID and set it using `wrangler secret put NOTIFY_DEVICE_ID`.
-3. Have Netops choose the route/hostname (Netops owns DNS) and fill in that routing configuration. `workers_dev` is disabled; this draft has no route, domain, or account ID. With approval, run `wrangler deploy` from `alert-receiver/`; the v1 migration creates the SQLite-backed ledger class.
-4. Have Netops deploy the agreed gateway HMAC change and set gateway `NOTIFY_WEBHOOK` to `https://<host>/alert`.
-5. Run the approved canary drill with Netops and confirm the incident arrives on Preetham's iPhone. The helper can sign an inert UUID-only probe to test the receiver; that probe is not a substitute for the end-to-end gateway canary. Do not include any content or key name in either webhook.
+After approval:
+
+1. Netops generates `NOTIFY_WEBHOOK_SECRET` with `openssl rand -hex 32` and sets it on both Workers. Netops also sets `NOTIFY_ALERT_WEBHOOK_URL` on the receiver. Supply both values through stdin to `wrangler secret put`, never in files, chat, or command arguments.
+2. Netops activates the planned custom domain and sets gateway `NOTIFY_WEBHOOK=https://safety-alert.belweave.tech/alert`.
+3. Run `wrangler deploy` from `alert-receiver/`. The v1 migration creates the SQLite-backed ledger class.
+4. Run the supervised gateway drill with Netops and confirm delivery to Preetham's iPhone. The helper can sign an inert UUID-only receiver probe, but that probe does not replace the end-to-end gateway drill. Include no content or key name in either webhook.
 
 ## Not tested
 
 - Real Workers runtime, Durable Object storage/concurrency, and alarms.
-- Real Notify delivery, device targeting, and idempotency behaviour.
-- The real gateway, its proposed HMAC change, and the end-to-end canary.
+- Real Notify webhook delivery and its idempotency.
+- The end-to-end gateway drill.
