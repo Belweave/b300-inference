@@ -6,15 +6,16 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 import time
-from urllib.parse import urlparse
 
 import aiohttp
 import bench
 from warm_download import load_manifest
 from warm_logic import parse_pool, pool_table, recommend_running
 from warm_network import probe
+from serve_plan import add_arguments, argument_env, print_plan, variant, image_reference
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,19 +25,46 @@ def compare(reports):
     base = reports[0]
     rows = []
     for report in reports[1:]:
-        changed = [k for k in ('attn_mode','spec_decode') if base['config'][k] != report['config'][k]]
+        factors = ('layout', 'engram', 'dspark') if 'layout' in base['config'] else ('attn_mode','spec_decode')
+        changed = [k for k in factors if base['config'][k] != report['config'][k]]
         if len(changed) != 1: raise ValueError('Compare exactly one changed config at a time')
         if base.get('image_id') != report.get('image_id'): raise ValueError('Image changed between comparisons')
         if base['model'] != report['model'] or base['workload'] != report['workload']:
             raise ValueError('Model/revision and workload must match')
         # Remaining actual engine settings must be identical; labels alone are insufficient.
         left,right=dict(base['engine_config']),dict(report['engine_config'])
-        keys = ('PARALLELISM',) if changed[0]=='attn_mode' else ('SPECULATION',)
+        keys = {'attn_mode': ('PARALLELISM',), 'spec_decode': ('SPECULATION',),
+                'layout': ('LAYOUT', 'PARALLELISM'), 'engram': ('ENGRAM',),
+                'dspark': ('DSPARK', 'SPECULATION')}[changed[0]]
         for key in keys: left.pop(key,None);right.pop(key,None)
         if left != right: raise ValueError('Additional engine settings changed')
         rows.append({'factor':changed[0], 'baseline':base['config'], 'candidate':report['config'],
                      'baseline_results':base['results'], 'candidate_results':report['results']})
     return rows
+
+
+def variant_metadata(warm, requested):
+    if 'launch_plan' not in warm or 'container_started_at' not in warm:
+        raise ValueError('Warm report predates A/B plans; warm again with this kit')
+    actual = variant(warm['config'])
+    if actual != warm['variant'] or actual != warm['launch_plan']['variant']:
+        raise ValueError('Warm variant metadata disagrees with launch plan')
+    if 'ATTN_MODE' in requested and 'LAYOUT' not in requested:
+        requested = dict(requested, LAYOUT=variant(requested)['layout'])
+    for key in ('LAYOUT', 'ENGRAM', 'DSPARK'):
+        if key in requested and requested[key] != actual[key.lower()]:
+            raise ValueError(key+' does not match the running warm variant')
+    if any(k in requested for k in ('ENGINE_IMAGE', 'BAKED_IMAGE', 'IMAGE_DIGEST')):
+        wanted = image_reference(requested)
+        if any(k in requested for k in ('ENGINE_IMAGE', 'BAKED_IMAGE')):
+            matches = wanted['image_ref'] == warm['image_ref']
+        else:
+            matches = wanted['image_digest'] == warm['image_digest']
+        if not matches: raise ValueError('Requested image does not match warm report')
+    if not warm['image_pinned']:
+        print('WARNING: measurement image is unpinned: '+warm['image_ref'], file=sys.stderr)
+    return {'config': actual, 'launch_plan': warm['launch_plan'],
+            **{k: warm[k] for k in ('image_ref', 'image_digest', 'image_tag', 'image_pinned')}}
 
 
 async def sweep():
@@ -71,6 +99,7 @@ def markdown(report):
                       'no full context fits; reduce context/memory use before launch' if recommended == 0 else
                       str(recommended))
     lines=['# Noon measurement','', 'Measurements apply only to this model, image and synthetic workload.', '',
+           'Variant: `'+json.dumps(report['config'], sort_keys=True)+'`; image: `'+report['image_ref']+'`.', '',
            f"Recommended MAX_RUNNING_REQUESTS: **{recommendation}** at {advice['context_tokens']} tokens per stream.",
            advice['basis'], '',
            '| Streams | Average context | Tokens required | Pool with 10% headroom | Fits |',
@@ -89,13 +118,19 @@ def markdown(report):
     return '\n'.join(lines)+'\n'
 
 
-def main():
+def main(argv=None):
     parser=argparse.ArgumentParser()
     parser.add_argument('--warm-report',type=Path,help='Ready warm timing JSON; supplies actual selected configuration')
     parser.add_argument('--log',type=Path,help='Redacted SGLang startup log')
     parser.add_argument('--output',type=Path,default=ROOT/'runs'/('measure-'+time.strftime('%Y%m%dT%H%M%S')))
     parser.add_argument('--compare',nargs='+',type=Path)
-    args=parser.parse_args()
+    add_arguments(parser)
+    args=parser.parse_args(argv)
+    requested = argument_env(args, os.environ)
+    if args.print_plan:
+        print_plan(requested, args.available_ram_gb)
+        return
+    if args.available_ram_gb is not None: parser.error('--available-ram-gb is dry-run only')
     args.output.parent.mkdir(parents=True,exist_ok=True)
     if args.compare:
         rows=compare([json.loads(p.read_text()) for p in args.compare])
@@ -106,22 +141,23 @@ def main():
     if not args.warm_report or not args.log: parser.error('--warm-report and --log required')
     warm=json.loads(args.warm_report.read_text())
     if warm['state'] != 'ready': raise ValueError('Warm report is not ready')
+    metadata = variant_metadata(warm, requested)
     manifest=load_manifest()
     if warm['model'] != manifest['model']: raise ValueError('Wrong model/revision')
     e=os.environ
     e['MODEL']=manifest['model']['repo'];e['ENDPOINT']=e.get('ENDPOINT','http://127.0.0.1:8000')
-    if urlparse(e['ENDPOINT']).hostname not in ('localhost','127.0.0.1','::1'):
-        raise ValueError('Measure is local-only; public endpoint testing is separate')
+    if e['ENDPOINT'] != 'http://127.0.0.1:8000':
+        raise ValueError('Measure requires the warm front door at http://127.0.0.1:8000')
     if not e.get('INFER_UPSTREAM_KEY'): raise ValueError('Existing exported upstream key required')
     # Tie measurements to the container that produced the warm report.
-    state=subprocess.check_output(['docker','inspect',warm['container'],'--format','{{.Image}} {{.State.Running}}'],
+    state=subprocess.check_output(['docker','inspect',warm['container'],'--format','{{.Image}} {{.State.Running}} {{.State.StartedAt}}'],
                                   stderr=subprocess.DEVNULL,text=True,timeout=10).strip()
-    if state != warm['image_id']+' true': raise ValueError('Recorded warm container is not running with the same image')
+    if state != warm['image_id']+' true '+warm['container_started_at']: raise ValueError('Warm container image/running state/start time changed; warm again before measuring')
     config=warm['config']
     e['BENCH_FIXED_PROMPT']='1'
     pool=parse_pool(args.log.read_text())
     report={'model':manifest['model'],'image_id':warm['image_id'],'engine_config':config,
-            'config':{'attn_mode':'dp_ep' if config['PARALLELISM']=='dp_ep' else 'tp8','spec_decode':'off'},
+            **metadata,
             'workload':{'prompt_repeats':int(e.get('PROMPT_REPEATS','64')),'output_tokens':int(e.get('OUTPUT_TOKENS','256')),'fixed_operator_prompt':True},
             'pool':pool,'pool_table':pool_table(pool),'recommendation':recommend_running(pool,int(config['CONTEXT_LENGTH'])),
             'network':probe(manifest,e.get('MIRROR_URL'),e.get('MIRROR_TEST_OBJECT','speed-test.bin'),e.get('MIRROR_AUTH_HEADER')),

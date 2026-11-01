@@ -41,14 +41,15 @@ Key knobs: `BAKED_IMAGE`, `BASE_WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41`),
 `MEM_FRACTION=.85`, `CHUNKED_PREFILL_SIZE=8192`, `SCHEDULE_POLICY=lpm`,
 `CONTEXT_LENGTH=262144` (250000–400000), `MAX_RUNNING_REQUESTS=64` (provisional;
 replace from the noon pool report and sweep),
-`ATTN_MODE=tp8|dp_ep`, `SPEC_DECODE=off`, `WARM_GRAPH_BS=1,2,4,8,16,32,64`,
+`LAYOUT=tp8|dep4x2|dep8x1|dep2x4`, `ENGRAM=gpu|host`, `DSPARK=off|on`, `WARM_GRAPH_BS=1,2,4,8,16,32,64`,
 `HIERARCHICAL_CACHE=0`, `ENGRAM_TABLE_GB=203`, `ENGRAM_HEADROOM_GB=32`.
 MTP is deliberately rejected; see [flag evidence and dropped options](sglang-warm-flags.md).
 Baseline is TP8/EP8. The parsers are `deepseek-v41` for reasoning and `deepseekv41`
-for tools, with `--trust-remote-code` and no Jinja template. Host Engram uses
-`SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` only after the available-RAM gate;
-otherwise it is explicitly `0`, with the reason recorded. These model-card
-settings still need qualification against the actual preview image.
+for tools, with `--trust-remote-code` and no Jinja template. Engram defaults to GPU; explicit host mode uses
+`--engram-config '{"placement":"cpu"}'` only after the available-RAM gate
+(203 GB per replica + 32 GB headroom), and fails closed on insufficient RAM.
+No deprecated Engram environment variable is emitted. See the
+[A/B noon runbook](ab-serve-plans.md) for flags, dry-runs and image qualification.
 
 Bake `docker/Dockerfile.baked` before the rental, pin the result, and stage it
 locally as `BAKED_IMAGE`. A locally present baked image skips pulls; otherwise

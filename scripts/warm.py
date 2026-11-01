@@ -1,4 +1,5 @@
 """Node warm-up only: no gateway flips, tunnels, provider actions or secret files."""
+import argparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -15,7 +16,9 @@ import urllib.request
 import uuid
 
 from warm_download import load_manifest, acquire
-from warm_logic import deadline, jit_start, ram_gate, tunnel_slot
+from warm_logic import deadline, jit_start, tunnel_slot
+from serve_plan import (variant, image_reference, host_gate, require_host_ram, build_plan,
+                        add_arguments, argument_env, print_plan)
 from mirror_auth import parse_mirror_auth
 from warm_network import probe, public_url
 from readiness import check
@@ -28,6 +31,10 @@ def settings(data, env, ram):
     if env.get('ATTN_MODE','tp8') not in ('tp8','dp_ep'): raise ValueError('ATTN_MODE must be tp8 or dp_ep')
     if env.get('SPEC_DECODE','off') != 'off':
         raise ValueError('SPEC_DECODE=mtp dropped: no verified V4.1 MTP recipe; use off')
+    v = variant(env)
+    require_host_ram({**env, 'ENGRAM': v['engram']}, ram)
+    if env.get('ENGINE_EXTRA_ARGS_JSON', '[]') != '[]':
+        raise ValueError('A/B warm plans require named selectors, not ENGINE_EXTRA_ARGS_JSON')
     maximum = int(env.get('MAX_RUNNING_REQUESTS','64'))
     if maximum < 1: raise ValueError('MAX_RUNNING_REQUESTS must be positive')
     graph = ([int(x) for x in env['WARM_GRAPH_BS'].split(',')] if env.get('WARM_GRAPH_BS')
@@ -41,10 +48,13 @@ def settings(data, env, ram):
                 ENGINE_PORT='8000', CONTEXT_LENGTH=str(context),
                 MEM_FRACTION=env.get('MEM_FRACTION','0.85'), MAX_RUNNING_REQUESTS=str(maximum),
                 CHUNKED_PREFILL_SIZE=env.get('CHUNKED_PREFILL_SIZE','8192'), CUDA_GRAPH_MAX_BS=str(graph[-1]),
-                PARALLELISM='tp' if env.get('ATTN_MODE','tp8') == 'tp8' else 'dp_ep', SPECULATION='none',
+                PARALLELISM='tp' if v['layout'] == 'tp8' else 'dp_ep',
+                SPECULATION='dspark' if v['dspark'] == 'on' else 'none',
+                LAYOUT=v['layout'], ENGRAM=v['engram'], DSPARK=v['dspark'],
                 WARM_GRAPH_BS=','.join(map(str,graph)), SCHEDULE_POLICY=env.get('SCHEDULE_POLICY','lpm'),
                 ENABLE_CACHE_REPORT='1', HIERARCHICAL_CACHE=env.get('HIERARCHICAL_CACHE','0'),
-                SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE='1' if ram['enabled'] else '0')
+                ENGRAM_TABLE_GB=env.get('ENGRAM_TABLE_GB','203'),
+                ENGRAM_HEADROOM_GB=env.get('ENGRAM_HEADROOM_GB','32'))
 
 
 class Warm:
@@ -52,6 +62,8 @@ class Warm:
         # Validate operator-exported values before filesystem/network/GPU work.
         self.tunnel_slot = tunnel_slot(env)
         parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
+        variant(env)
+        self.image_meta = image_reference(env)
         self.env = env
         self.data = load_manifest()
         self.end = deadline(int(env['WINDOW_END']))
@@ -102,7 +114,11 @@ class Warm:
         return output
 
     def image(self):
-        image = self.env.get('BAKED_IMAGE') or self.env.get('ENGINE_IMAGE','lmsysorg/sglang:dev-dsv41')
+        image = self.image_meta['image_ref']
+        if not self.image_meta['image_pinned']:
+            print('WARNING: image is unpinned: '+image, file=sys.stderr)
+        with self.lock:
+            self.record.update(self.image_meta); self.save()
         local = subprocess.run(['docker','image','inspect',image],stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL,timeout=self.remaining()).returncode == 0
         if not (self.env.get('BAKED_IMAGE') and local): self.command(['docker','pull',image])
@@ -151,30 +167,39 @@ class Warm:
             'print(json.dumps({"version":importlib.metadata.version("sglang"),'
             '"server_args_sha256":hashlib.sha256(open(a.__file__,"rb").read()).hexdigest()}))'])
         self.record['sglang_package'] = json.loads(info.strip().splitlines()[-1])
-        args = subprocess.check_output([sys.executable,str(ROOT/'scripts/engine.py')],env=selected).decode().strip('\0').split('\0')
-        help_text=self.command(['docker','run','--rm','--network','none','--entrypoint','python3',image,
-                               '-m','sglang.launch_server','--help'])
-        required={a for a in args if a.startswith('--')}|{'--api-key'}
-        missing=sorted(required-set(re.findall(r'--[a-z0-9-]+',help_text)))
-        if missing: raise ValueError('Image lacks required flags: '+','.join(missing))
-        # Parse syntax/choices without ServerArgs post-init (which may touch
-        # model configuration or GPU state). Real launch/health validates runtime.
-        self.command(['docker','run','--rm','--network','none','--entrypoint','python3',image,'-c',
-                      'import argparse,sys; from sglang.srt.server_args import ServerArgs; '
-                      'p=argparse.ArgumentParser(); ServerArgs.add_cli_args(p); p.parse_args(sys.argv[1:])',*args[3:]])
-        self.record['argv_without_key']=args
-        self.command(['docker','create','-i','--name',self.name,'--gpus','all','--network','host','--ipc','host',
-                      '--cap-add','SYS_NICE','--log-driver','none','--mount',f'type=bind,src={self.weights_dir},dst=/weights,readonly',
-                      '--mount',f'type=bind,src={ROOT},dst=/kit,readonly','--entrypoint','python3',image,'/kit/scripts/serve.py'])
+        plan = build_plan(selected, image, self.name, self.weights_dir, ROOT)
+        # Validate all processes before allocating GPUs. The installed preview
+        # must understand the exact flags and Engram schema we researched.
+        for process in plan['processes']:
+            args = process['argv_without_key']
+            help_text = self.command(['docker','run','--rm','--network','none','--entrypoint','python3',
+                                      image, '-m', args[2], '--help'])
+            required = {a for a in args if a.startswith('--')} | {'--api-key'}
+            missing = sorted(required-set(re.findall(r'--[a-z0-9-]+',help_text)))
+            if missing: raise ValueError('Image lacks required flags: '+','.join(missing))
+            if process['role'] == 'engine':
+                code = ('import argparse,sys; from sglang.srt.server_args import ServerArgs; '
+                        'from sglang.srt.arg_groups.engram_config import EngramConfig; '
+                        'p=argparse.ArgumentParser(); ServerArgs.add_cli_args(p); '
+                        'a=p.parse_args(sys.argv[1:]); EngramConfig.from_dict(a.engram_config)')
+            else:
+                code = ('import argparse,sys; from sglang_router.router_args import RouterArgs; '
+                        'p=argparse.ArgumentParser(); RouterArgs.add_cli_args(p); p.parse_args(sys.argv[1:])')
+            self.command(['docker','run','--rm','--network','none','--entrypoint','python3',image,'-c',code,*args[3:]])
+        self.record['launch_plan'] = plan
+        self.record['variant'] = plan['variant']
+        self.record['argv_without_key'] = plan['processes'][0]['argv_without_key']
+        self.save()
+        self.command(plan['docker_create'])
         self.created=True
         self.record['container']=self.name
         with (self.run/'engine.log').open('ab') as log:
             redactor=subprocess.Popen([sys.executable,str(ROOT/'scripts/redact.py')],stdin=subprocess.PIPE,
                                       stdout=log,stderr=subprocess.DEVNULL,start_new_session=True)
-            engine=subprocess.Popen(['docker','start','-ai',self.name],stdin=subprocess.PIPE,stdout=redactor.stdin,
+            engine=subprocess.Popen(plan['docker_start'],stdin=subprocess.PIPE,stdout=redactor.stdin,
                                     stderr=subprocess.STDOUT,start_new_session=True)
             redactor.stdin.close()
-            engine.stdin.write((json.dumps({'kind':'engine','env':{**selected,'INFER_UPSTREAM_KEY':self.env['INFER_UPSTREAM_KEY']}})+'\n').encode())
+            engine.stdin.write((json.dumps({'plan':plan,'env':{**selected,'INFER_UPSTREAM_KEY':self.env['INFER_UPSTREAM_KEY']}})+'\n').encode())
             engine.stdin.close()
         self.record['capture_pids']=[engine.pid,redactor.pid]; self.save()
 
@@ -182,7 +207,8 @@ class Warm:
         while True:
             self.remaining()
             try:
-                check('http://127.0.0.1:8000',self.env['INFER_UPSTREAM_KEY'],self.data['model']['repo'])
+                for process in self.record['launch_plan']['processes']:
+                    check(f"http://127.0.0.1:{process['port']}", self.env['INFER_UPSTREAM_KEY'], self.data['model']['repo'])
                 break
             except Exception:
                 state=self.command(['docker','inspect',self.name,'--format','{{.State.Running}}']).strip()
@@ -204,9 +230,17 @@ class Warm:
             sock.bind(('127.0.0.1',8000))
         mem=re.search(r'^MemAvailable:\s+(\d+) kB',Path('/proc/meminfo').read_text(),re.M)
         if not mem: raise ValueError('MemAvailable is unavailable')
-        ram=ram_gate(int(mem[1])*1024,table=int(float(self.env.get('ENGRAM_TABLE_GB','203'))*1e9),
-                     headroom=int(float(self.env.get('ENGRAM_HEADROOM_GB','32'))*1e9))
+        ram=host_gate(self.env, int(mem[1])*1024)
         selected=settings(self.data,self.env,ram)
+        planned = build_plan(selected, self.image_meta['image_ref'], self.name, self.weights_dir, ROOT)
+        for process in planned['processes']:
+            ports = [process['port']]
+            argv = process['argv_without_key']
+            if '--dist-init-addr' in argv:
+                ports.append(int(argv[argv.index('--dist-init-addr')+1].rsplit(':', 1)[1]))
+            for port in ports:
+                with socket.socket() as sock:
+                    sock.bind(('127.0.0.1', port))
         self.record.update(ram=ram,config=selected); self.save()
         with ThreadPoolExecutor(max_workers=3) as pool:
             image=pool.submit(self.stage,'image',self.image)
@@ -218,13 +252,14 @@ class Warm:
         self.remaining()
         def gate():
             available=int(re.search(r'^MemAvailable:\s+(\d+) kB',Path('/proc/meminfo').read_text(),re.M)[1])*1024
-            return ram_gate(available, table=int(float(self.env.get('ENGRAM_TABLE_GB','203'))*1e9),
-                            headroom=int(float(self.env.get('ENGRAM_HEADROOM_GB','32'))*1e9))
+            return host_gate(self.env, available)
         ram=self.stage('ram_gate',gate)
         selected=settings(self.data,self.env,ram)
         self.record.update(ram=ram,config=selected);self.save()
         self.stage('launch_and_flag_validation',lambda:self.launch(image_id,selected))
         self.stage('load_graph_and_health',self.health)
+        self.record['container_started_at'] = self.command(
+            ['docker','inspect',self.name,'--format','{{.State.StartedAt}}']).strip()
         def replay():
             for path in sorted((ROOT/'config/warm-prefixes').glob('*.json')):
                 self.completion(json.loads(path.read_text()),16)
@@ -245,13 +280,21 @@ class Warm:
         print('Recommended JIT start epoch: '+str(self.record['jit_start_epoch']),flush=True)
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_arguments(parser)
+    args = parser.parse_args(argv)
+    env = argument_env(args, os.environ)
+    if args.print_plan or env.get('DRY_RUN') == '1':
+        print_plan(env, args.available_ram_gb)
+        return 0
+    if args.available_ram_gb is not None: parser.error('--available-ram-gb is dry-run only')
     os.umask(0o077)
     (ROOT/'runs').mkdir(exist_ok=True)
     with (ROOT/'runs/warm.lock').open('w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         try:
-            warm=Warm(os.environ)
+            warm=Warm(env)
         except ValueError as exc:
             print('WARM FAILED: '+redact(str(exc),secret_values()),file=sys.stderr)
             return 1
