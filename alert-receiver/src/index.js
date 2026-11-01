@@ -122,11 +122,12 @@ export default {
   },
 };
 
-function notification(incident) {
+function notification(incident, drill) {
+  const prefix = drill === true ? "DRILL, not a real incident. " : "";
   return {
-    title: "Child-safety block fired",
+    title: prefix + "Child-safety block fired",
     summary: `Incident ${incident}. File a CyberTipline report.`,
-    body: `A child-safety hard-block fired on the B300 inference gateway. Incident ID: ${incident}. ` +
+    body: prefix + `A child-safety hard-block fired on the B300 inference gateway. Incident ID: ${incident}. ` +
       `The offending key was revoked automatically and sealed evidence is in the b300-evidence bucket under incidents/${incident}.json. ` +
       "Report to NCMEC's CyberTipline (https://report.cybertip.org/) as required by 18 U.S.C. 2258A. " +
       "Do not open or share the evidence outside the reporting process.",
@@ -163,8 +164,10 @@ export class AlertLedger {
       let record = await this.storage.get("record");
       if (record) return json({ incident, status: record.status });
       record = { incident, status: "pending", attempts: 0, first_seen: now(this.env) };
+      if (this.env.DRILL_MODE === "1") record.drill = true;
       record.retry_at = now(this.env) + 30_000;
       await this.save(record, record.retry_at);
+      if (record.drill === true) console.log(JSON.stringify({ event: "drill_mode", incident, drill: true }));
       await this.attempt(record);
       return json({ incident, status: record.status === "sent" ? "sent" : "queued" }, 202);
     });
@@ -200,7 +203,7 @@ export class AlertLedger {
     // Persist a recovery alarm before I/O in case the object stops mid-attempt.
     record.retry_at = now(this.env) + TIMEOUT_MS + delay;
     await this.save(record, record.retry_at);
-    const result = await this.deliver(record.incident);
+    const result = await this.deliver(record);
     const log = { incident: record.incident, attempt: record.attempts, status: result.status };
     if (result.ok) {
       record.status = "sent";
@@ -218,7 +221,7 @@ export class AlertLedger {
     }
   }
 
-  async deliver(incident) {
+  async deliver({ incident, drill }) {
     const url = webhookUrl(this.env.NOTIFY_ALERT_WEBHOOK_URL);
     if (!url) return { ok: false, status: "config" };
     const controller = new AbortController();
@@ -227,10 +230,10 @@ export class AlertLedger {
       const response = await fetch(url, {
         method: "POST",
         headers: {
-          "Idempotency-Key": `b300-safety-${incident}`,
+          "Idempotency-Key": `b300-safety-${drill === true ? "drill-" : ""}${incident}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(notification(incident)),
+        body: JSON.stringify(notification(incident, drill)),
         signal: controller.signal,
         redirect: "manual",
       });

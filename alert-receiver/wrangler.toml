@@ -7,6 +7,9 @@ workers_dev = false
 [vars]
 REPLAY_WINDOW_S = "300"
 MAX_ATTEMPTS = "12"
+# Default off. Netops sets DRILL_MODE="1" only for the supervised drill
+# and must remove it before any production deploy.
+# DRILL_MODE = "1"
 
 [[durable_objects.bindings]]
 name = "LEDGER"

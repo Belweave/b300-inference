@@ -156,6 +156,80 @@ test("valid signature queues once and sends only the fixed notification fields",
   assert.equal(await h.objects.get(incident).storage.getAlarm(), null);
 });
 
+for (const mode of [undefined, "0", "true", " 1", 1]) {
+  test(`DRILL_MODE ${JSON.stringify(mode)} preserves production payload bytes, records, and logs`, async (t) => {
+    const h = harness(t, mode === undefined ? {} : { DRILL_MODE: mode });
+    const incident = randomUUID();
+    assert.equal((await h.post(JSON.stringify({ incident }))).status, 202);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].body, JSON.stringify({
+      title: "Child-safety block fired",
+      summary: `Incident ${incident}. File a CyberTipline report.`,
+      body: `A child-safety hard-block fired on the B300 inference gateway. Incident ID: ${incident}. ` +
+        `The offending key was revoked automatically and sealed evidence is in the b300-evidence bucket under incidents/${incident}.json. ` +
+        "Report to NCMEC's CyberTipline (https://report.cybertip.org/) as required by 18 U.S.C. 2258A. " +
+        "Do not open or share the evidence outside the reporting process.",
+      project: "B300 safety",
+    }));
+    assert.equal(JSON.stringify(h.calls[0].headers), JSON.stringify({
+      "Idempotency-Key": `b300-safety-${incident}`,
+      "Content-Type": "application/json",
+    }));
+    assert.equal(JSON.stringify(await h.record(incident)), JSON.stringify({
+      incident, status: "sent", attempts: 1, first_seen: START,
+      notified_at: START, notification_id: "evt_test",
+    }));
+    const { writes } = h.objects.get(incident).storage;
+    assert.equal(JSON.stringify(writes[0]), JSON.stringify({
+      incident, status: "pending", attempts: 0, first_seen: START, retry_at: START + 30_000,
+    }));
+    assert.ok(writes.every((record) => !Object.hasOwn(record, "drill")));
+    assert.deepEqual(logs, [{ level: "log", args: [JSON.stringify({
+      event: "notify_sent", incident, attempt: 1, status: 200,
+    })] }]);
+  });
+}
+
+test("drill prefixes the full title and body, preserves other fields, and uses a distinct key", async (t) => {
+  const incident = randomUUID();
+  const body = JSON.stringify({ incident });
+  const production = harness(t);
+  await production.post(body);
+  const drillLog = { level: "log", args: [JSON.stringify({ event: "drill_mode", incident, drill: true })] };
+  const h = harness(t, { DRILL_MODE: "1" }, async () => {
+    assert.equal((await h.record(incident)).drill, true);
+    assert.deepEqual(logs.filter(({ args }) => JSON.parse(args[0]).event === "drill_mode"), [drillLog]);
+    return Response.json({ ok: true, eventId: "evt_drill", delivered: 1 });
+  });
+  const response = await h.post(body);
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { incident, status: "sent" });
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].body, JSON.stringify({
+    title: "DRILL, not a real incident. Child-safety block fired",
+    summary: `Incident ${incident}. File a CyberTipline report.`,
+    body: `DRILL, not a real incident. A child-safety hard-block fired on the B300 inference gateway. Incident ID: ${incident}. ` +
+      `The offending key was revoked automatically and sealed evidence is in the b300-evidence bucket under incidents/${incident}.json. ` +
+      "Report to NCMEC's CyberTipline (https://report.cybertip.org/) as required by 18 U.S.C. 2258A. " +
+      "Do not open or share the evidence outside the reporting process.",
+    project: "B300 safety",
+  }));
+  assert.equal(JSON.stringify(h.calls[0].headers), JSON.stringify({
+    "Idempotency-Key": `b300-safety-drill-${incident}`,
+    "Content-Type": "application/json",
+  }));
+  assert.notEqual(h.calls[0].headers["Idempotency-Key"], production.calls[0].headers["Idempotency-Key"]);
+  assert.ok(h.objects.get(incident).storage.writes.every((record) => record.drill === true));
+  const acceptedLogs = structuredClone(logs);
+  assert.equal((await h.post(body)).status, 200);
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(logs, acceptedLogs);
+  const output = JSON.stringify(logs);
+  for (const forbidden of [WEBHOOK_URL, "test-hook-token", SECRET]) {
+    assert.equal(output.includes(forbidden), false);
+  }
+});
+
 test("configured webhook URL is used verbatim", async (t) => {
   const url = "https://notify.invalid/hooks/other-test-token?mode=alert";
   const h = harness(t, { NOTIFY_ALERT_WEBHOOK_URL: url });
@@ -452,6 +526,66 @@ test("Notify 500 stays pending, duplicate POST does not retry, and alarm succeed
   assert.equal((await h.record(incident)).notified_at, START + 30_000);
   assert.equal(h.calls[0].headers["Idempotency-Key"], h.calls[1].headers["Idempotency-Key"]);
   assert.equal(h.calls[0].body, h.calls[1].body);
+});
+
+test("drill retries keep identical bytes and headers across alarms, an env change, and restart", async (t) => {
+  const h = harness(t, { DRILL_MODE: "1" }, (_url, _init, count) =>
+    new Response(null, { status: count < 5 ? 500 : 201 }));
+  const incident = randomUUID();
+  const body = JSON.stringify({ incident });
+  assert.deepEqual(await (await h.post(body)).json(), { incident, status: "queued" });
+  const acceptedLogs = structuredClone(logs);
+  const duplicate = await h.post(body);
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), { incident, status: "pending" });
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(logs, acceptedLogs);
+  await h.alarm(incident);
+  await h.alarm(incident);
+  h.env.DRILL_MODE = undefined;
+  await h.alarm(incident);
+  h.restart(incident);
+  await h.alarm(incident);
+  assert.equal(h.calls.length, 5);
+  assert.equal((await h.record(incident)).status, "sent");
+  assert.equal(h.calls[0].headers["Idempotency-Key"], `b300-safety-drill-${incident}`);
+  for (const call of h.calls) {
+    assert.equal(call.body, h.calls[0].body);
+    assert.equal(JSON.stringify(call.headers), JSON.stringify(h.calls[0].headers));
+  }
+  assert.ok(h.objects.get(incident).storage.writes.every((record) => record.drill === true));
+  assert.deepEqual(logs.filter(({ args }) => JSON.parse(args[0]).event === "drill_mode"), [
+    { level: "log", args: [JSON.stringify({ event: "drill_mode", incident, drill: true })] },
+  ]);
+  const sentLogs = structuredClone(logs);
+  assert.equal((await h.post(body)).status, 200);
+  assert.equal(h.calls.length, 5);
+  assert.deepEqual(logs, sentLogs);
+  const output = JSON.stringify(logs);
+  for (const forbidden of [WEBHOOK_URL, "test-hook-token", SECRET]) {
+    assert.equal(output.includes(forbidden), false);
+  }
+});
+
+test("production retries stay production when drill mode is enabled after acceptance", async (t) => {
+  const h = harness(t, {}, () => new Response(null, { status: 500 }));
+  const incident = randomUUID();
+  const body = JSON.stringify({ incident });
+  await h.post(body);
+  h.env.DRILL_MODE = "1";
+  await h.post(body);
+  assert.equal(h.calls.length, 1);
+  await h.alarm(incident);
+  h.restart(incident);
+  await h.alarm(incident);
+  assert.equal(h.calls.length, 3);
+  assert.equal(h.calls[0].headers["Idempotency-Key"], `b300-safety-${incident}`);
+  for (const call of h.calls) {
+    assert.equal(call.body, h.calls[0].body);
+    assert.equal(JSON.stringify(call.headers), JSON.stringify(h.calls[0].headers));
+  }
+  assert.ok(h.objects.get(incident).storage.writes.every((record) => !Object.hasOwn(record, "drill")));
+  assert.deepEqual(logs.map(({ args }) => JSON.parse(args[0]).event), ["notify_failed", "notify_failed", "notify_failed"]);
 });
 
 for (const status of [400, 401, 403, 404, 409, 429, 502, 503, 302]) {

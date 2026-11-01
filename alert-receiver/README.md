@@ -29,6 +29,14 @@ The outbound JSON has exactly four fields: `title` ("Child-safety block fired"),
 
 Logs contain only structured event metadata and validated incident IDs, never credentials, signatures, request bodies, exception text, or Notify response bodies.
 
+## Drill mode
+
+Drill mode is on only when `DRILL_MODE` is exactly the string `"1"`. Unset and all other values, including `"0"`, `"true"`, `" 1"`, and the number `1`, use production behavior. Netops sets `DRILL_MODE=1` only for the supervised drill and must remove it before any production deploy.
+
+The ledger decides the mode once when it first accepts an incident and stores `drill: true` only for drill incidents. Production records have no `drill` field. Every attempt uses that stored flag, so retries send identical payload bytes and headers after a restart or a change to `DRILL_MODE`.
+
+Drill notifications prefix both `title` and `body` with exactly `"DRILL, not a real incident. "`, including the trailing space, followed by the existing production text. `summary`, `project`, and the JSON field set and order stay unchanged. The Idempotency-Key is `b300-safety-drill-<incident>` instead of the production key `b300-safety-<incident>`. At acceptance, the receiver logs `{"event":"drill_mode","incident":"<incident>","drill":true}` exactly once with `console.log`, without the webhook URL or token. Retries and duplicate POSTs add no drill log line, and duplicates send nothing. Production logs are unchanged.
+
 ## Notify webhook
 
 `NOTIFY_ALERT_WEBHOOK_URL` is the Notify webhook service URL for service "B300 CSAM alert". The receiver posts JSON to `/hooks/:token` with only `Content-Type` and `Idempotency-Key` headers. The URL token is the credential; there is no Authorization header.
@@ -61,8 +69,9 @@ After approval:
 
 1. Netops generates `NOTIFY_WEBHOOK_SECRET` with `openssl rand -hex 32` and sets it on both Workers. Netops also sets `NOTIFY_ALERT_WEBHOOK_URL` on the receiver. Supply both values through stdin to `wrangler secret put`, never in files, chat, or command arguments.
 2. Netops activates the planned custom domain and sets gateway `NOTIFY_WEBHOOK=https://safety-alert.belweave.tech/alert`.
-3. Run `wrangler deploy` from `alert-receiver/`. The v1 migration creates the SQLite-backed ledger class.
-4. Run the supervised gateway drill with Netops and confirm delivery to Preetham's iPhone. The helper can sign an inert UUID-only receiver probe, but that probe does not replace the end-to-end gateway drill. Include no content or key name in either webhook.
+3. Before any production deploy, confirm `DRILL_MODE` is unset: `wrangler.toml` has no active `DRILL_MODE` var and there is no dashboard var.
+4. Run `wrangler deploy` from `alert-receiver/`. The v1 migration creates the SQLite-backed ledger class.
+5. Run the supervised gateway drill with Netops and confirm delivery to Preetham's iPhone. The helper can sign an inert UUID-only receiver probe, but that probe does not replace the end-to-end gateway drill. Include no content or key name in either webhook.
 
 ## Not tested
 
