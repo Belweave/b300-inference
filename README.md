@@ -20,9 +20,11 @@ DRY_RUN=1 ./bootstrap.sh
 DRY_RUN=1 ./watcher/watch.sh --once
 ```
 
-Before a real rental, prepare Linux x86_64 with Docker, NVIDIA Container Toolkit,
+Before a real rental, prepare Linux (amd64 or arm64 with matching engine image) with Docker, NVIDIA Container Toolkit,
 Python ≥3.10, `requirements-node.txt`, `rsync`, `curl`, `flock`, `setsid`, `timeout`,
-and optionally `s5cmd`. The kit checks Docker/toolkit rather than installing or
+and `zstd`, plus optionally `s5cmd`. Stage all runtime dependencies and compiled
+kernel assets before using an offline node; the kit does not install packages there.
+The kit checks Docker/toolkit rather than installing or
 restarting the driver stack during a paid window. Its CUDA-13 engine images need
 a driver ≥580; the preflight verifies eight B300s, SM 10.3 in PyTorch, NVLink,
 CUDA capability, and weight-disk space. Reserve another 100 GB on Docker's data
@@ -60,75 +62,85 @@ The launchd plist is a template only: edit absolute paths, create `logs/`, and
 arrange runtime credentials through a credential-manager wrapper before installing
 it yourself. Do not put secrets in launchd `EnvironmentVariables`.
 
-## Network contract and handoff
+## Network modes and handoff
 
 ```text
-Clients -> https://infer.belweave.tech
-           Cloudflare Worker: keys, per-key limits, between-window 503
-                         |
-           infer-origin.belweave.tech / named tunnel b300-infer
-                         |
-           outbound cloudflared replica(s), same token each window
-                         |
-           127.0.0.1:8000  SGLang or vLLM, upstream API key required
-                         |
-                     8 × B300
-
-Mac -> grid portal claim hook -> SSH bootstrap -> status/benchmark/archive
-Optional local LiteLLM at 127.0.0.1:4000 -> authenticated engine :8000
+infer.belweave.tech Worker (client keys, limits, between-window 503)
+                |
+infer-origin.belweave.tech / named tunnel b300-infer
+                |
+   NETWORK_MODE=cloudflared        NETWORK_MODE=ssh, SSH_DIRECTION=forward
+   node cloudflared (outbound)     Netops relay cloudflared -> relay local port
+                |                                      |
+                |                         relay dials node SSH :22 (-L)
+                +---------------------+----------------+
+                                      |
+                           node 127.0.0.1:8000 + API key
+                                      |
+                                   8 × B300
 ```
 
-The engine binds loopback; there are no Docker published ports. Linux host
-networking allows cloudflared to reach loopback. A host/provider ingress firewall
-must also deny unsolicited connections to distributed-worker/NCCL ports, which
-are internal engine implementation details. The API key is supplied to the engine's
-`--api-key` flag from `INFER_UPSTREAM_KEY`, with `ORIGIN_KEY` as fallback. It travels
-through an anonymous SSH/Docker stdin pipe. Docker logging is disabled; attached
-output is redacted before being written. Never use `set -x`, `docker inspect` of
-secret-bearing containers from other tooling, or environment dumps in artifacts.
+`NETWORK_MODE=auto` is the default. From the node it makes concurrent HTTPS HEAD
+probes with short timeouts to Cloudflare's public API, the pinned GitHub release
+asset (following its asset-host redirect), and Hugging Face. All pass selects
+`cloudflared`; any failure selects `ssh`. Status records the requested/selected
+mode and each result. These probes test HTTPS reachability, not tunnel TCP/UDP
+7844 connectivity, registry access, or sustained download throughput. Explicit
+`cloudflared` and `ssh` skip the probes. Force `ssh` if the grid only permits
+inbound SSH. The old `TUNNEL` selector is replaced by `NETWORK_MODE`.
 
-Netops' script is kept verbatim at `vendor/infer-gateway/node-tunnel.sh`. Bootstrap
-calls it **after authenticated health + a real chat completion**, maps
-`CF_TUNNEL_TOKEN` to `TUNNEL_TOKEN` in that child only, and extracts its printed PID.
-A new node joins the same tunnel while the old node remains connected. The script's
-successful start/PID is not proof of edge routing or a zero-downtime handoff: Netops
-must verify tunnel registration, Worker routing, upstream key agreement, origin
-access controls, request timeouts, and streaming behavior.
+In SSH mode the watcher uses pushed images and weights (or an existing volume),
+not outbound node downloads. The node only serves loopback and reports `ready`;
+the **relay dials into it** with `-L`. Only inbound SSH port 22 is required. No
+Docker public ports are published. Keep the node's host/provider ingress policy
+at SSH-only, including blocking distributed engine/NCCL ports from outside.
 
-Teardown collects logs, GPU dumps, metrics, and benchmark files first. It supports
-an optional bounded `DRAIN_HOOK` executable for a version-specific engine admission
-stop. There is no universally verified drain endpoint for these two builds, so
-none is fabricated. It polls running **and queued** request gauges for three zero
-samples, for at most `DRAIN_SECONDS` (120 by default). Missing gauges mean “unknown”,
-never zero. If arrivals continue or metrics are absent, the bound may expire and
-remaining requests will be cut off.
+[docs/relay-contract.md](docs/relay-contract.md) is the handoff specification for
+Netops. Its existing `relay.sh`, owned by Netops in infer-gateway, is external:
+configure `RELAY_SH`, optionally `RELAY_HOST`, and existing SSH key paths. The
+watcher calls its exact `up`, `down`, and `push-weights` interfaces. A stable claim
+ID gives the same relay identity on retries. `up` is called only after node
+readiness; `down` after the node's drain/stop state, or on expiry/error cleanup.
+Two overlapping windows get two relay ports/replicas on the same tunnel. Netops
+must address port collisions, relay-local expiry, and health-aware route removal;
+Mac failure can otherwise leave relay processes running past a window.
 
-* Default (`REPLACEMENT_READY=0`): drain as above, stop gateway/engine, then signal
-  cloudflared immediately, in the EXIT cleanup path as well. This follows Netops'
-  connector-last contract, but has a short dead-origin routing race and cannot
-  guarantee admission stops without a tested drain hook.
-* Confirmed replacement (`REPLACEMENT_READY=1`): disconnect the old connector
-  **first**, then bounded-drain and stop services. Set this only after Netops confirms
-  another replica is healthy. The watcher does not infer readiness from a PID.
-  cloudflared's own graceful-shutdown limit may be shorter than DRAIN_SECONDS;
-  test long streams before promising seamless handoff.
+For nodes allowing outbound SSH but not HTTPS, `SSH_DIRECTION=reverse` enables
+`scripts/reverse-tunnel.sh` with loopback `-R`, keepalives and reconnect. This is
+an optional transport, not a duplicate of Netops' relay helper. The draft `up`
+only supports forward mode, so Netops must provision reverse-mode relay cloudflared
+separately. The watcher never calls forward `up` against a reverse listener.
 
-PID cleanup verifies the executable name, with a narrowly scoped
-`pkill -f '^/tmp/cloudflared tunnel '` fallback on this dedicated node. The
-vendored helper has known issues: unpinned **latest**, no checksum, linux-amd64
-only, a token in process argv, and raw `/tmp/cloudflared.log`. Those are upstream
-exceptions to the kit's otherwise env-only secret transport; the helper is not
-modified. Archive copies are redacted. Ask Netops for an architecture-aware pinned
-binary, verified checksum, env-token use without argv, sanitized logs, explicit
-shutdown settings, and consistent env names. The kit rejects ARM nodes with the
-Cloudflare path rather than silently downloading the wrong binary.
+The updated node helper is preserved **byte-for-byte** and tested against SHA256
+`d04775930a6a4bcc36657a1c86cd641f2a54fffac4855f8be983d3b3e18dba7a`.
+It pins cloudflared **2026.10.7**, verifies amd64/arm64 checksums and consumes
+`CF_TUNNEL_TOKEN` directly. Bootstrap performs no token-name mapping and calls it
+only after health, auth/readiness, and chat smoke pass. It captures the helper's
+printed PID. The helper uses child env for the token rather than argv. The remaining
+raw `/tmp/cloudflared.log` and shared binary path are documented in the vendor note;
+archive copies are redacted. A live PID alone is not proof of tunnel registration.
 
-`GATEWAY=litellm` creates an optional authenticated loopback gateway; you must pin
-`LITELLM_IMAGE`. The Netops tunnel still targets the engine at :8000, so enabling
-LiteLLM does **not** move it into the public path. That would require a revised
-Netops port/ingress contract. `TUNNEL=none` is local-only. `TUNNEL=tailscale` fails
-with a clear hook-required message: Funnel would be a separate public front door
-and needs a separately reviewed adapter. No automatic Funnel command is shipped.
+Both engines serve unauthenticated `GET /health` on **127.0.0.1:8000** despite
+`--api-key`; `/v1/models` is protected. Bootstrap checks health without auth,
+requires 401 for unauthenticated model listing, verifies authenticated model
+listing, then requests a real completion. [Source evidence and test scope](docs/health-contract.md).
+Use `INFER_UPSTREAM_KEY` in env. `ORIGIN_KEY` is a deprecated fallback, warns once
+per process family when used, and is scheduled for removal next release.
+Secrets travel via anonymous SSH/Docker stdin pipes and env; never env files.
+Docker logging is disabled and attached engine output is redacted before disk.
+
+Teardown collects diagnostics, optionally invokes a tested `DRAIN_HOOK` to stop
+admission, and waits for running **and queued** request gauges to be zero for three
+samples, bounded by `DRAIN_SECONDS` (120). Unknown metrics never mean zero. No
+universal engine drain endpoint is fabricated. At the bound, remaining work may
+be cut off. In direct mode the default is engine stop then immediate connector
+stop; `REPLACEMENT_READY=1` disconnects the old node connector first. In relay
+forward mode the watcher calls down after drain/stop, leaving a possible gap up
+to `POLL_SECONDS` plus command latency. See the contract for reverse-mode limits.
+
+`GATEWAY=litellm` remains optional at 127.0.0.1:4000; the public tunnel still uses
+the engine at :8000. Offline gateway use requires its image already installed.
+Changing the public path to go through LiteLLM needs a revised Netops contract.
 
 ## Model facts
 
@@ -210,22 +222,49 @@ fit. These defaults cap requests at 32K.
 
 ## Weight delivery and window budget
 
-Preference: **already staged local persistent NVMe volume**, then **same-region
-S3/R2 mirror**, then **HF Xet direct**. A remote persistent network volume may be
-slower than a local download. Hash every file against the pinned HF SHA256 (large
-files) or Git blob SHA1 (small files); the pinned manifest is retained on the volume.
-A volume run needs no HF request. S3/HF obtain authoritative manifest metadata
-from HF; an S3 mirror must preserve the pinned repo layout and tokenizer/encoding
-files, not just weight shards. No mirror or volume is created by this kit.
+`WEIGHTS_SOURCE=hf|mirror|push|volume` chooses transport; `mirror` replaces `s3`.
+All modes verify against the **committed** file list in `docs/model-metadata.json`:
+SHA256/LFS plus size for weights and other LFS files; Git blob SHA1 plus size for
+small repo files. No node-side metadata fetch is required, even for mirror mode.
+Do not trust a manifest shipped alongside the pushed weights in place of this
+committed list. Both fp8 and nvfp4 variants have immutable revisions and file hashes.
 
-HF uses `huggingface_hub.snapshot_download(max_workers=16)` (equivalent concurrency
-control to `hf download --max-workers 16`) and `HF_XET_HIGH_PERFORMANCE=1`. Current
-Hub uses `hf_xet`; legacy `HF_HUB_ENABLE_HF_TRANSFER`/`hf_transfer` is deprecated.
-Downloads resume through the HF local cache; corrupt completed shards are discarded
-and fetched again. S3 uses four file workers × eight multipart workers by default;
-verified shards are skipped on retries, but an interrupted individual S3 shard
-restarts. `s5cmd` is chosen over rclone for a small S3-native parallel copier;
-rclone is a valid alternative for other storage backends, not implemented here.
+With egress, prefer staged local persistent NVMe, then a nearby S3/R2 mirror, then
+HF Xet. Without egress, use an existing verified volume or `push`. Preserve the
+whole snapshot layout, including native encoding/tokenizer files and LICENSE.
+HF uses resumable `snapshot_download(max_workers=16)` with
+`HF_XET_HIGH_PERFORMANCE=1` (the same worker control as `hf download --max-workers`).
+Current Hub uses hf_xet; legacy hf_transfer is deprecated. Mirror mode uses
+s5cmd with bounded file/multipart parallelism. Verified files are skipped; a
+partially copied S3 shard restarts. No mirror or volume is created automatically.
+
+`scripts/prestage.sh` downloads once to `STAGING_DIR/<variant>/weights` and exports
+an image under `STAGING_DIR/<variant>/images`. Set `MODEL_VARIANT=fp8` (default,
+DeepSeek mixed FP8/FP4 base) or `nvfp4` (official NVIDIA variant). It selects the
+matching pinned revision automatically. `STAGING_PLATFORM=linux/amd64` prevents
+accidentally exporting a Mac-native ARM image; set linux/arm64 for an ARM node.
+The real prestage workflow is implemented but **was not run**; only its dry run
+was executed. It uses `docker save IMAGE | zstd -T0 -3`, records archive SHA256/
+size, immutable image config ID, platform and registry RepoDigests in `engine.json`.
+`-T0` intentionally uses available staging CPUs; budget resources on the staging host.
+
+Push mode calls external `relay.sh push-weights` when configured; otherwise it
+uses disjoint file lists across `PUSH_WORKERS` parallel rsync `--partial` streams.
+The node hashes all files before launch. Image transfer uses resumable rsync;
+the node checks the archive before `zstd -dc | docker load`, then verifies the
+loaded image config SHA256/platform and launches that immutable ID. Docker save/
+load may drop registry RepoDigests: the verified ID is the image config digest,
+not a false claim that a distribution manifest digest survived the transfer.
+Stage image metadata over the same trusted SSH channel as the archive. Pushed
+image archives and runs/<id>/incoming are excluded from teardown diagnostics.
+
+For a remote relay, weights must exist under `RELAY_STAGING_DIR/<variant>/weights`
+there; the image archive is currently pushed from the Mac staging directory.
+No 510 GB Mac-to-relay staging hop is silently performed. `IMAGE_SOURCE=push|pull`
+defaults to push when weights are pushed; SSH mode requires push images. The
+watcher automatically switches an offline auto choice to push; direct node
+bootstrap fails clearly if no suitable staged assets were supplied. No engine
+fallback download is attempted. Stage runtime dependencies/kernel caches too.
 
 For size S decimal GB and link R Gbit/s, ideal minutes = **8S / (60R)**.
 Planning transfer time below assumes 70% useful link utilization, excluding
@@ -239,7 +278,11 @@ hashing, image pull contention, decompression, cache misses, and load/compile.
 
 **Unmeasured cold-start planning allowances:** persistent local volume 15–35 min;
 same-region mirror at sustained 10–25 Gbit/s 20–50 min; HF at sustained 10–25 Gbit/s
-25–60 min; at 1 Gbit/s allow roughly 110–140 min. These are budgets, not provider
+25–60 min; at 1 Gbit/s allow roughly 110–140 min.
+For push, the relay/staging host **upload** rate is the bottleneck: the base
+checkpoint alone is about 68–70 min at 1 Gbit/s or 6.8–7 min at 10 Gbit/s; NVFP4
+is about 57 min at 1 Gbit/s. A nearby relay or NVFP4 can materially shorten staging.
+These are budgets, not provider
 promises. Xet/CDN throughput can be lower. A full 510 GB hash pass alone takes
 about 1.7–8.5 min at 5–1 GB/s disk read throughput. Record real phase times before
 committing to an operating margin. Container pull and weight pull run concurrently,
@@ -250,13 +293,24 @@ so their wall-time contribution is approximately their maximum, not their sum.
 | Portal allocation / SSH | 2–5 min; use portal expiry, never restart its clock |
 | Preflight + runtime checks | 1–2 min |
 | Container pull | 3–10 min, overlapped with weights |
-| Weight pull | table above; volume has no network transfer |
+| Weight pull / push | table above; push before bootstrap; volume has no transfer |
 | Checksum pass | 2–9 min on suitable local storage |
 | Load / compile / CUDA graphs | 8–20 min |
 | Health / chat / warmup / tunnel | 1–3 min |
 | First-window sweep | reserve 15–35 min, workload dependent; not a promise |
 | Serving | remaining time to T−10 min |
 | Drain / package / retrieval | final 10 min; timer starts on node even if Mac sleeps |
+
+| Push source / link | Unmeasured full cold-start allowance |
+|---|---|
+| Mac/relay upload, 1 Gbit/s | 110–150 min (base); 95–135 min (NVFP4) |
+| Nearby relay upload, 10 Gbit/s | 25–55 min |
+| Nearby relay upload, 25 Gbit/s | 20–45 min |
+
+Push occurs before bootstrap: network copy time is therefore additional to the
+node phase timings. Add compressed image bytes / upload bandwidth, checksum,
+zstd decompression and Docker import. These ranges are planning allowances, not
+measurements; at low upload rates the window can be mostly consumed by transfer.
 
 The load test reports TTFT p50/p95, p95 of **per-request mean TPOT**, per-stream
 median decode tok/s, aggregate input/output tok/s, and errors at each concurrency.
@@ -311,20 +365,26 @@ All secrets are caller-exported only. The scripts do not automatically source
 | Names | Default / purpose |
 |---|---|
 | `HF_TOKEN` | Optional for public model; env-only HF access |
-| `CF_TUNNEL_TOKEN` → child `TUNNEL_TOKEN` | Required for default Cloudflare path; same named tunnel across windows |
-| `INFER_UPSTREAM_KEY`, `ORIGIN_KEY` | Required origin key; first name wins |
+| `CF_TUNNEL_TOKEN` | Node helper or relay runtime env; same named tunnel across windows; no kit mapping |
+| `INFER_UPSTREAM_KEY`, `ORIGIN_KEY` | Required origin key; deprecated alias only if primary absent, removed next release |
 | `LITELLM_MASTER_KEY`, `LITELLM_IMAGE` | Optional gateway key and explicitly pinned image |
 | `NODE_SSH_KEY_PATH`, `NODE_KIT_DIR` | Existing SSH identity path; remote relative kit path `b300-inference` |
 | `PROVIDER_API_TOKEN` | Reserved hook credential; no provider calls implemented |
 | `ACCOUNT_CONFIG`, `ACCOUNT_NAME`, `PROVIDER_HOOKS` | One nonsensitive account config; default config/account.env |
-| `MODEL`, `MODEL_REVISION` | 1017 model and immutable HF commit above; change both for a different checkpoint |
+| `MODEL_VARIANT`, `MODEL`, `MODEL_REVISION` | fp8 / nvfp4 chooses pinned model/revision; overrides must match committed metadata |
 | `ENGINE`, `ENGINE_IMAGE` | sglang or vllm; image defaults in config/ |
-| `WEIGHTS_SOURCE`, `WEIGHTS_DIR` | hf / s3 / volume; /data/weights/DeepSeek-V4.1-Flash-1017 |
+| `WEIGHTS_SOURCE`, `WEIGHTS_DIR` | hf / mirror / push / volume; /data/weights/<model-repo-name> |
 | `WEIGHTS_S3_URI`, `S3_ENDPOINT_URL` | Existing mirror prefix; optional R2/S3-compatible endpoint; no credentials in URLs |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` | Environment credentials for s5cmd; no credential files shipped |
 | `ARTIFACT_S3_URI` | Optional artifact upload prefix; 90-second upload bound, local archive retained on failure |
 | `RUN_ID`, `WINDOW_END`, `WINDOW_MINUTES` | Run ID; actual expiry epoch preferred; fallback 240 min from node bootstrap |
-| `PORT`, `GATEWAY_PORT`, `GATEWAY`, `TUNNEL` | 8000 (required Netops contract), 4000, none, cloudflare |
+| `PORT`, `GATEWAY_PORT`, `GATEWAY` | 8000 (required contract), 4000, none |
+| `NETWORK_MODE`, `SSH_DIRECTION` | auto / cloudflared / ssh; forward / reverse |
+| `STAGING_DIR`, `STAGING_PLATFORM`, `IMAGE_SOURCE` | repo staging/ (ignored); linux/amd64; pull or push |
+| `PUSH_DIR`, `PUSH_WORKERS` | Node incoming image directory (watcher sets it); 4 file workers |
+| `RELAY_SH`, `RELAY_HOST`, `RELAY_STATE` | External Netops executable; optional remote relay; helper's state dir |
+| `RELAY_SSH_KEY_PATH`, `RELAY_NODE_SSH_KEY_PATH`, `RELAY_STAGING_DIR` | Existing Mac→relay key, relay→node key, and relay weight staging root |
+| `REVERSE_RELAY_TARGET`, `REVERSE_RELAY_PORT`, `REVERSE_SSH_KEY_PATH` | Opt-in node→relay transport; existing node key/agent; Netops must provision its connector |
 | `DRAIN_SECONDS`, `DRAIN_HOOK`, `REPLACEMENT_READY` | 120; optional executable; 0 unless replacement independently verified |
 | `FIRST_WINDOW` | 1; benchmark reserved once by local atomic marker |
 | `TARGET_TTFT_MS`, `TARGET_TPOT_MS` | 2000, 50; illustrative targets, not promised SLA |
@@ -349,15 +409,16 @@ All secrets are caller-exported only. The scripts do not automatically source
   detached benchmark launcher, and uninstalled launchd template.
 * `vendor/infer-gateway/`: verbatim Netops script and provenance note.
 * `tests/`: claim validation, offline dry runs, native flags/binding, secret redaction,
-  status history, and a loopback fragmented-SSE test.
-* `docs/model-metadata.json`: public HF metadata snapshot; `docs/planning.html`: transfer/cost chart.
+  status history, fragmented SSE, network decisions, exact vendor hash, image
+  integrity, exact relay argv, and mocked watcher push/ready/up/drain/down ordering.
+* `docs/relay-contract.md`, `docs/health-contract.md`: source-backed operational contracts.
+* `docs/model-metadata.json`: public HF metadata and per-file checksums; `docs/planning.html`: transfer/cost chart.
 * `.env.example`, `.gitignore`, `requirements-node.txt`, `Makefile`, this README.
 
 `make lint` runs shellcheck and bash -n on every shell script, including vendor,
 and py_compile on Python files. Tests use no GPU/provider/tunnel. `.venv`, logs,
 runs, archives, secret env files, and generated status are ignored. No secrets
-are stored by the kit's configuration or SSH/Docker transport. The exact vendor
-script's argv/raw-log caveat is documented above, not hidden by modifying it.
+are stored by the kit's configuration or SSH/Docker transport. The vendor helper's raw-log/shared-path caveat is documented above; it is preserved unchanged.
 
 ## Decisions needed before the first window
 
@@ -368,11 +429,14 @@ script's argv/raw-log caveat is documented above, not hidden by modifying it.
   six-account plans are deferred entirely until terms permit them.
 * Persistent local storage availability, attach time, capacity, and egress charges.
 * Existing weight mirror bucket/prefix/region and credentials, if desired.
-* Netops token and upstream-key handoff through env/credential manager; resolve
-  `CF_TUNNEL_TOKEN` vs `TUNNEL_TOKEN`, `INFER_UPSTREAM_KEY` vs `ORIGIN_KEY`.
+* Netops token and upstream-key handoff through env/credential manager; use
+  canonical `CF_TUNNEL_TOKEN` and `INFER_UPSTREAM_KEY`; retire the deprecated alias.
 * Netops confirmation of infer.belweave.tech → infer-origin.belweave.tech,
   b300-infer ingress, origin protection, SSE timeouts, replica readiness, and a
-  tested admission/drain endpoint. Pin/checksum/architecture fixes to the helper.
+  tested admission/drain endpoint. Relay-side pinning/expiry/port collision fixes
+  remain open; node-helper pinning/checksums/architecture are already fixed.
+* Relay host/executable path, existing key paths, staged storage, and upload rate;
+  offline Docker/kernel dependencies. Reverse mode needs Netops connector support.
 * Target prompt/output lengths, thinking mode, TTFT/TPOT targets, prices, billing
   units, and a real benchmark before capacity or profit claims.
 
@@ -395,3 +459,6 @@ Primary sources inspected 2026-10-31:
 13. [s5cmd parallel copy documentation](https://github.com/peak/s5cmd)
 14. [Cloudflare tunnel run parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/) and [tunnel tokens](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/)
 15. [DeepSeek October 17 release announcement](https://api-docs.deepseek.com/news/news261017/) and [deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe)
+
+16. [SGLang auth source](https://github.com/sgl-project/sglang/blob/e3ec98b15e6a82da7e58efff9f8d4448b9f0ae62/python/sglang/srt/utils/auth.py) and [main HTTP routes](https://github.com/sgl-project/sglang/blob/e3ec98b15e6a82da7e58efff9f8d4448b9f0ae62/python/sglang/srt/entrypoints/http_server.py)
+17. [vLLM v0.32.0 health route](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/serve/instrumentator/health.py) and [auth middleware](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/serve/middleware/authenticate.py)

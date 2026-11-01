@@ -22,14 +22,17 @@ if state.get('ok') == 'running':
 state.update(phase=phase, ok=result, phase_started_epoch=now,
              updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
              elapsed_seconds=now-state['started_epoch'])
-for name in ('gpu.json', 'runtime.json'):
+for name in ('gpu.json', 'runtime.json', 'network.json'):
     p = path.parent / name
     if p.exists():
         state[name[:-5]] = json.loads(p.read_text())
 if os.environ.get('WINDOW_END'):
     state['window_end'] = int(os.environ['WINDOW_END'])
     state['teardown_epoch'] = int(os.environ['WINDOW_END']) - 600
-if phase == 'serving' and os.environ.get('TUNNEL') == 'cloudflare':
+state['ready'] = phase in ('ready', 'serving') and result == 'ok'
+if not state['ready']:
+    state['public_endpoint'] = None
+if phase == 'serving' and state.get('network', {}).get('selected') == 'cloudflared':
     state['public_endpoint'] = 'https://infer.belweave.tech'
 tmp = path.with_suffix('.tmp')
 tmp.write_text(json.dumps(state, indent=2) + '\n')

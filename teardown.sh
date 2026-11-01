@@ -64,10 +64,17 @@ stop_service() {
 stop_service "$GATEWAY_NAME"
 stop_service "$SERVER_NAME"
 stop_connector
+if [[ -f $RUN_DIR/reverse.pid ]]; then
+    reverse_pid=$(cat "$RUN_DIR/reverse.pid")
+    if [[ $reverse_pid =~ ^[0-9]+$ && -r /proc/$reverse_pid/cmdline ]] && tr '\0' ' ' < "/proc/$reverse_pid/cmdline" | grep -Fq "$KIT_ROOT/scripts/reverse-tunnel.sh"; then
+        kill "$reverse_pid" 2>/dev/null || true
+    fi
+fi
 status stopped ok
 # Log writers have closed after container shutdown. Never archive env files or weights.
 archive="$KIT_ROOT/runs/$RUN_ID.tar.gz"
-tar -czf "$archive.tmp" -C "$KIT_ROOT/runs" "$RUN_ID"
+# Pushed image archives can be tens of GB; never package them as diagnostics.
+tar --exclude="$RUN_ID/incoming" --exclude='*.tar.zst' -czf "$archive.tmp" -C "$KIT_ROOT/runs" "$RUN_ID"
 mv "$archive.tmp" "$archive"
 if [[ -n ${ARTIFACT_S3_URI:-} ]]; then
     upload_cmd=(s5cmd)

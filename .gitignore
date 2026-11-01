@@ -11,3 +11,7 @@ __pycache__/
 .DS_Store
 watcher/accounts.local
 config/account.env
+
+staging/
+*.safetensors
+*.tar.zst

@@ -1,5 +1,6 @@
 """Validate a normalized claim and resolve a key path reference in memory."""
 import json
+import hashlib
 import os
 import re
 import sys
@@ -29,6 +30,13 @@ def validate(data):
     return data['host'], str(data['port']), data['user'], path, str(data['expires_at'])
 
 
+def window_id(data):
+    # Credential paths can differ on Mac/relay; allocation identity must not.
+    identity = {k:data[k] for k in ('host','port','user','expires_at')}
+    return 'window-'+hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
+
+
 if __name__ == '__main__':
-    for value in validate(json.load(open(sys.argv[1]))):
+    data = json.load(open(sys.argv[1]))
+    for value in (*validate(data), window_id(data)):
         print(value)

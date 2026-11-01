@@ -4,6 +4,8 @@ import os
 import sys
 
 e = os.environ
+if e.get('ENGINE_PORT', '8000') != '8000':
+    raise SystemExit('Engine port must be 8000 for the relay contract')
 common = ['--host', '127.0.0.1', '--port', e['ENGINE_PORT'], '--served-model-name', e['MODEL']]
 if e['ENGINE'] == 'sglang':
     args = ['python3', '-m', 'sglang.launch_server', '--model-path', '/weights',

@@ -20,3 +20,6 @@ The watcher calls `provider_claim` after availability/start hooks, validates its
 output, then runs the same bootstrap for every claim. `bootstrap.sh --claim PATH`
 is the Mac-side entry point for an already normalized claim. Node-side bootstrap
 has no account-specific logic. Do not paste raw portal replies into the repository.
+
+The watcher derives a stable window ID from host/port/user/expires_at (SHA256),
+excluding the key path, so retries and relay calls refer to the same allocation.

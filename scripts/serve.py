@@ -6,6 +6,7 @@ import sys
 payload = json.loads(sys.stdin.readline())
 os.environ.update(payload['env'])
 if payload['kind'] == 'engine':
+    os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', DO_NOT_TRACK='1')
     args = subprocess.check_output(['python3', '/kit/scripts/engine.py']).decode().strip('\0').split('\0')
     args += ['--api-key', os.environ['INFER_UPSTREAM_KEY']]
 else:

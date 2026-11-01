@@ -70,8 +70,8 @@ class KitTests(unittest.TestCase):
             for name,body in files.items():
                 (root/name).write_bytes(body)
                 manifest['files'].append({'path':name,'size':len(body),'sha256':hashlib.sha256(body).hexdigest(),'git_sha1':None})
-            (root/'.kit-manifest.json').write_text(json.dumps(manifest))
-            env=dict(os.environ,WEIGHTS_DIR=directory,WEIGHTS_SOURCE='volume',MODEL='fixture',MODEL_REVISION='a'*40)
+            (root/'metadata.json').write_text(json.dumps({'variants':{'fp8':manifest}}))
+            env=dict(os.environ,WEIGHTS_DIR=directory,WEIGHTS_SOURCE='volume',MODEL='fixture',MODEL_REVISION='a'*40,MODEL_METADATA=str(root/'metadata.json'))
             command=['python3',str(ROOT/'scripts/weights.py')]
             good=subprocess.run(command,env=env,capture_output=True,text=True)
             self.assertEqual(good.returncode,0,good.stderr)

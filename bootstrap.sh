@@ -11,19 +11,25 @@ source "$KIT_ROOT/config/$ENGINE.env"
 set +a
 [[ $PARALLELISM == tp || $PARALLELISM == dp_ep ]] || die 'Invalid PARALLELISM'
 [[ $SPECULATION == none || $SPECULATION == dspark ]] || die 'Invalid SPECULATION'
+case "$NETWORK_MODE" in auto|cloudflared|ssh) ;; *) die 'Invalid NETWORK_MODE';; esac
+case "$SSH_DIRECTION" in forward|reverse) ;; *) die 'Invalid SSH_DIRECTION';; esac
+case "$WEIGHTS_SOURCE" in hf|mirror|push|volume) ;; *) die 'Invalid WEIGHTS_SOURCE; s3 was renamed mirror';; esac
 if [[ $DRY_RUN == 1 ]]; then
     cat <<PLAN
-DRY RUN: no GPU, Docker, provider, SSH, downloads, or tunnel operations.
-1. Preflight: Linux x86_64; 8x B300; driver >=580; CUDA >=13; NVLink; disk.
-2. Check Docker + NVIDIA toolkit; arm node-local teardown at window end minus 10m.
-3. In parallel: pull $ENGINE_IMAGE and verify/resume $WEIGHTS_SOURCE weights.
-4. Launch $ENGINE: TP8, requests=$MAX_RUNNING_REQUESTS, prefill=$CHUNKED_PREFILL_SIZE,
-   graph max=$CUDA_GRAPH_MAX_BS, context=$CONTEXT_LENGTH, speculation=$SPECULATION; native KV format.
-5. Bind 127.0.0.1:$PORT; api-key from INFER_UPSTREAM_KEY (ORIGIN_KEY alias).
-6. Wait for /health and authenticated /v1/chat/completions smoke.
-7. Optional gateway=$GATEWAY; tunnel=$TUNNEL via verbatim Netops script after smoke.
-   Public infer.belweave.tech -> infer-origin.belweave.tech -> localhost:8000.
-8. Record status/digests; teardown collects, drains within budget, stops services.
+DRY RUN: no probes, downloads, Docker, SSH, or tunnels executed.
+1. Preflight: Linux; 8x B300; driver >=580; CUDA >=13; NVLink; disk.
+2. NETWORK_MODE=$NETWORK_MODE; SSH_DIRECTION=$SSH_DIRECTION.
+   auto: bounded HTTPS HEAD probes to Cloudflare, GitHub release/assets, HF;
+   all pass -> cloudflared; any failure -> ssh. Record results in status.json.
+3. WEIGHTS_SOURCE=$WEIGHTS_SOURCE; IMAGE_SOURCE=$IMAGE_SOURCE.
+   push: verify staged files against docs/model-metadata.json; SHA256 image archive,
+   zstd -dc | docker load; verify loaded image ID. No node-side data downloads.
+4. Launch $ENGINE ($ENGINE_IMAGE), TP8, loopback 127.0.0.1:8000, env API key.
+5. GET /health without auth; /v1/models with auth (+401 without); real chat smoke.
+6. cloudflared: call unchanged Netops helper after readiness; CF_TUNNEL_TOKEN env.
+   ssh/forward: report ready; watcher calls external relay.sh up WINDOW USER@HOST KEY.
+   ssh/reverse: optional node -R transport; Netops must supply relay-side connector.
+7. T-10m: bounded drain, stop services; watcher calls relay.sh down after drain.
 PLAN
     exit 0
 fi
@@ -31,7 +37,6 @@ umask 077
 [[ $(uname -s) == Linux ]] || die 'Node bootstrap requires Linux'
 [[ $PORT == 8000 ]] || die 'Netops contract requires PORT=8000'
 [[ -n $INFER_UPSTREAM_KEY ]] || die 'INFER_UPSTREAM_KEY (or ORIGIN_KEY) required'
-case "$TUNNEL" in cloudflare) [[ $(uname -m) == x86_64 ]] || die 'Vendored tunnel requires x86_64'; : "${CF_TUNNEL_TOKEN:?required}";; none) ;; tailscale) die 'Tailscale requires a separately reviewed hook; no automatic funnel';; *) die 'Invalid TUNNEL';; esac
 case "$GATEWAY" in none) ;; litellm) : "${LITELLM_MASTER_KEY:?required}"; : "${LITELLM_IMAGE:?pin a LiteLLM image digest}";; *) die 'Invalid GATEWAY';; esac
 need python3; need flock; need setsid; need docker; need nvidia-smi; need curl
 mkdir -p "$RUN_DIR"
@@ -56,7 +61,7 @@ if p.exists():
  if int(old['WINDOW_END']) != int(os.environ['WINDOW_END']):
   raise SystemExit('Reruns require the original WINDOW_END; do not extend the deadline')
 else:
- p.write_text(json.dumps({k:os.environ[k] for k in ('RUN_ID','WINDOW_END','ENGINE','MODEL','MODEL_REVISION','PORT','TUNNEL','GATEWAY')}))
+ p.write_text(json.dumps({k:os.environ[k] for k in ('RUN_ID','WINDOW_END','ENGINE','MODEL','MODEL_REVISION','PORT','NETWORK_MODE','SSH_DIRECTION','GATEWAY')}))
 PY
 jobs_to_stop=()
 failed() {
@@ -109,11 +114,26 @@ if [[ ! -f $RUN_DIR/timer.pid ]] || ! kill -0 "$(cat "$RUN_DIR/timer.pid")" 2>/d
     nohup python3 "$KIT_ROOT/scripts/deadline.py" "$$" </dev/null > /dev/null 2>&1 9>&- &
     echo "$!" > "$RUN_DIR/timer.pid"
 fi
+phase network
+if [[ ${NETWORK_PREPROBED:-0} != 1 || ! -f $RUN_DIR/network.json ]]; then
+    python3 "$KIT_ROOT/scripts/network.py" > /dev/null
+fi
+SELECTED_NETWORK_MODE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected"])' "$RUN_DIR/network.json")
+export SELECTED_NETWORK_MODE
+if [[ $SELECTED_NETWORK_MODE == cloudflared ]]; then
+    : "${CF_TUNNEL_TOKEN:?required for cloudflared mode}"
+elif [[ $SELECTED_NETWORK_MODE == ssh ]]; then
+    [[ $WEIGHTS_SOURCE == push || $WEIGHTS_SOURCE == volume ]] || die 'SSH mode requires staged WEIGHTS_SOURCE=push (or volume)'
+    [[ $IMAGE_SOURCE == push ]] || die 'SSH mode requires IMAGE_SOURCE=push'
+    [[ -z ${ARTIFACT_S3_URI:-} ]] || die 'SSH mode returns artifacts over SSH; unset ARTIFACT_S3_URI'
+else
+    die 'Invalid selected network mode'
+fi
 phase pull
 export HF_XET_HIGH_PERFORMANCE=${HF_XET_HIGH_PERFORMANCE:-1}
 # Expand exported variables inside the isolated child process group.
 # shellcheck disable=SC2016
-setsid bash -c 'set -euo pipefail; docker pull "$ENGINE_IMAGE" 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/pull.log"' 9>&- &
+setsid bash -c 'set -euo pipefail; python3 "$KIT_ROOT/scripts/images.py" acquire 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/pull.log"' 9>&- &
 pull_pid=$!; jobs_to_stop+=("$pull_pid")
 # Expand exported variables inside the isolated child process group.
 # shellcheck disable=SC2016
@@ -121,6 +141,8 @@ setsid bash -c 'set -euo pipefail; python3 "$KIT_ROOT/scripts/weights.py" 2>&1 |
 weights_pid=$!; jobs_to_stop+=("$weights_pid")
 wait "$pull_pid"; wait "$weights_pid"
 jobs_to_stop=()
+ENGINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["effective_ref"])' "$RUN_DIR/loaded-image.json")
+export ENGINE_IMAGE
 docker image inspect "$ENGINE_IMAGE" --format '{{json .RepoDigests}}' > "$RUN_DIR/image-digests.json"
 # Runtime hardware probe is cheap and catches incompatible PyTorch wheels.
 docker run --rm --gpus all --entrypoint python3 "$ENGINE_IMAGE" -c 'import torch; assert torch.cuda.device_count()==8; assert torch.cuda.get_device_capability()==(10,3); print(torch.__version__,torch.version.cuda,torch.cuda.get_arch_list())' > "$RUN_DIR/torch.txt"
@@ -150,12 +172,17 @@ while ! python3 "$KIT_ROOT/scripts/origin_request.py" /health 2>/dev/null >/dev/
     [[ $container_state != exited && $container_state != dead ]] || die 'Engine exited; inspect engine.log'
     sleep 5
 done
+python3 "$KIT_ROOT/scripts/readiness.py"
 python3 "$KIT_ROOT/scripts/smoke.py"
 phase gateway
 if [[ $GATEWAY == litellm ]]; then
     export LITELLM_UPSTREAM_MODEL="openai/$MODEL" LITELLM_UPSTREAM_URL="$ENDPOINT/v1"
     if ! docker inspect "$GATEWAY_NAME" >/dev/null 2>&1; then
-        docker pull "$LITELLM_IMAGE" >/dev/null
+        if [[ $SELECTED_NETWORK_MODE == ssh ]]; then
+            docker image inspect "$LITELLM_IMAGE" >/dev/null || die 'Offline LiteLLM image must already be installed'
+        else
+            docker pull "$LITELLM_IMAGE" >/dev/null
+        fi
         docker create -i --name "$GATEWAY_NAME" --label "b300.run=$RUN_ID" --network host --log-driver none \
             --mount "type=bind,src=$KIT_ROOT,dst=/kit,readonly" --entrypoint python3 "$LITELLM_IMAGE" /kit/scripts/serve.py >/dev/null
     fi
@@ -169,9 +196,9 @@ if [[ $GATEWAY == litellm ]]; then
     SMOKE_GATEWAY=1 SMOKE_ENDPOINT="http://127.0.0.1:$GATEWAY_PORT" python3 "$KIT_ROOT/scripts/smoke.py"
 fi
 phase tunnel
-if [[ $TUNNEL == cloudflare ]]; then
+if [[ $SELECTED_NETWORK_MODE == cloudflared ]]; then
     if [[ ! -f $RUN_DIR/cloudflared.pid ]] || ! kill -0 "$(cat "$RUN_DIR/cloudflared.pid")" 2>/dev/null; then
-        tunnel_output=$(TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" "$KIT_ROOT/vendor/infer-gateway/node-tunnel.sh" 9>&-)
+        tunnel_output=$("$KIT_ROOT/vendor/infer-gateway/node-tunnel.sh" 9>&-)
         tunnel_pid=$(printf '%s\n' "$tunnel_output" | sed -n 's/^tunnel started, pid \([0-9][0-9]*\)$/\1/p')
         [[ $tunnel_pid =~ ^[0-9]+$ ]] || die 'Tunnel helper returned no PID'
         printf '%s\n' "$tunnel_pid" > "$RUN_DIR/cloudflared.pid"
@@ -179,5 +206,17 @@ if [[ $TUNNEL == cloudflare ]]; then
         kill -0 "$tunnel_pid" || die 'Tunnel exited'
     fi
 fi
-status serving ok
+if [[ $SELECTED_NETWORK_MODE == ssh ]]; then
+    if [[ $SSH_DIRECTION == reverse ]]; then
+        : "${REVERSE_RELAY_TARGET:?required for reverse mode}"
+        : "${REVERSE_RELAY_PORT:?required for reverse mode}"
+        if [[ ! -f $RUN_DIR/reverse.pid ]] || ! kill -0 "$(cat "$RUN_DIR/reverse.pid")" 2>/dev/null; then
+            nohup "$KIT_ROOT/scripts/reverse-tunnel.sh" </dev/null > "$RUN_DIR/reverse.log" 2>&1 9>&- &
+            echo "$!" > "$RUN_DIR/reverse.pid"
+        fi
+    fi
+    status ready ok
+else
+    status serving ok
+fi
 log "Ready: $ENDPOINT; status: $RUN_DIR/status.json"
