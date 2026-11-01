@@ -71,9 +71,13 @@ archive member through `redact.py`. Env files, keys, symlinks and incoming image
 archives are excluded. Scratch storage contains filtered bytes only. Fake-key
 tests exercise stdout/stderr capture and inspect every tar member.
 
-The short [live-node block](live-node.md) uses name-only `-e INFER_UPSTREAM_KEY`
-for convenience and an in-container filter before a mounted log file. Unlike
-the full kit's stdin transport, that environment value **is visible in Docker
-inspect** to Docker-capable users. Both approaches leave secrets in process
-memory/environment; host root and Docker access remain trusted. The unchanged
-vendor tunnel helper's raw `/tmp/cloudflared.log` caveat still applies.
+The [live-node block](live-node.md) reads `~/infer.key` into `INFER_KEY`,
+passes it through Docker environment and supplies `--api-key "$INFER_KEY"`.
+SGLang has no env/file option for this flag. The key is visible through Docker
+inspect and node process args (`ps`); root and Docker access remain trusted.
+Its in-container `sed -u "s/$INFER_KEY/[REDACTED]/g"` filters stdout/stderr into
+`/logs/dsv41.log`, with `--log-driver none` preventing raw Docker log retention.
+These measures protect logs only, not process arguments or container metadata.
+Use a key compatible with the sed expression as described in the live block.
+The vendor tunnel helper's raw `/tmp/cloudflared.log` caveat still applies.
+See [model naming](model-naming.md) for the gateway alias contract.

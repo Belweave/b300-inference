@@ -1,3 +1,28 @@
+# Live B300 launch
+
+Default: the finalized max-TPS configuration run on 8× B300 with TP8.
+The commands below are operator instructions, not an automatic deployment.
+The server binds `0.0.0.0:8000` inside the container; the published host port is
+loopback-only for the tunnel. Provision a private, mode-600 `~/infer.key` first.
+The exact sed expression assumes the key contains no sed pattern/replacement
+metacharacters (including `/`, `&`, and backslash); use a compatible generated key.
+SGLang has no env/file option for `--api-key`: Docker inspect and node process
+inspection (`ps`) can expose it. Sed plus `--log-driver none` protects logs only.
+
+Both parsers use **auto** on `lmsysorg/sglang:dev-dsv41`. From architecture
+`DeepseekV4ForCausalLM`, the image resolved tool calls to `deepseekv41` and
+reasoning to `deepseek-v41`. We use `auto`, not hardcoded parser names.
+
+No served-name override was used on the live server: it serves `/models/dsv41`.
+See [model naming and the gateway contract](model-naming.md) for current aliases
+and the future restart plan. Do not rename the running server as part of this update.
+
+The automated kit's default `PROFILE=longctx` uses the same SGLang capacity
+settings in `config/sglang.env`; its existing `/weights` mount, loopback binding,
+secret transport and served-name override are separate from this live recipe.
+`PROFILE=throughput` retains the old 32K/256 configuration in
+`config/throughput.env`; it is an optional alternative, not the default.
+
 ```bash
 # ON THE MAC, from the b300-inference repo; replace <user@node> and <port>.
 scp -P <port> -p ~/.config/b300/node.env <user@node>:~/
@@ -25,34 +50,21 @@ PY
 # NODE: launch; failures exit only this child bash, preserving your SSH shell.
 set +x
 bash -e <<'BASH'
-set -a; . ~/node.env; set +a
-: "${INFER_UPSTREAM_KEY:?missing from node.env}"
 umask 077
+INFER_KEY=$(cat ~/infer.key)
+: "${INFER_KEY:?missing from ~/infer.key}"
+export INFER_KEY
 mkdir -p -m 700 ~/dsv41-logs
 chmod 700 ~/dsv41-logs
 touch ~/dsv41-logs/dsv41.log
 chmod 600 ~/dsv41-logs/dsv41.log
-cat > ~/dsv41-redact.py <<'PY'
-import os, re, sys
-secrets = [v for k, v in os.environ.items() if v and any(s in k for s in ('KEY', 'TOKEN', 'PASSWORD', 'SECRET'))]
-for line in sys.stdin:
-    for value in sorted(secrets, key=len, reverse=True):
-        line = line.replace(value, '[REDACTED]')
-    line = re.sub(r'''(?i)(["']?(?:api[_-]?key|admin_api_key)["']?\s*[:=]\s*)(?:\[REDACTED\]|"[^"\n]*"|'[^'\n]*'|[^\s,}\])]+)''', r'\1[REDACTED]', line)
-    line = re.sub(r'(?i)(Bearer\s+)[^\s"\x27,;]+', r'\1[REDACTED]', line)
-    sys.stdout.write(line); sys.stdout.flush()
-PY
-# docker inspect shows -e values to anyone with Docker access on this node.
-# SGLang has no verified native env/file key option; its inner process argv still exposes the key.
-# Redaction runs inside the container before disk; host log: ~/dsv41-logs/dsv41.log.
-docker run -d --name dsv41 --gpus all --network host --ipc host \
-  --cap-add SYS_NICE --log-driver none -e INFER_UPSTREAM_KEY \
-  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-  --mount type=bind,src=/mnt/nvme/models/dsv41,dst=/weights,readonly \
+# The key is visible in container configuration and process args; filtering protects logs only.
+docker run -d --name dsv41 --gpus all --ipc host --shm-size 32g \
+  --cap-add SYS_NICE --log-driver none -p 127.0.0.1:8000:8000 -e INFER_KEY \
+  --mount type=bind,src=/mnt/nvme/models/dsv41,dst=/models/dsv41,readonly \
   --mount "type=bind,src=$HOME/dsv41-logs,dst=/logs" \
-  --mount "type=bind,src=$HOME/dsv41-redact.py,dst=/redact.py,readonly" \
   --entrypoint sh lmsysorg/sglang:dev-dsv41 -c \
-  'umask 077; python3 -m sglang.launch_server --model-path /weights --tp 8 --host 127.0.0.1 --port 8000 --context-length 409600 --max-running-requests 64 --cuda-graph-max-bs-decode 64 --chunked-prefill-size 4096 --mem-fraction-static 0.80 --reasoning-parser auto --tool-call-parser auto --enable-metrics --served-model-name deepseek-ai/DeepSeek-V4.1-Flash-1017 --api-key "$INFER_UPSTREAM_KEY" 2>&1 | python3 -u /redact.py >> /logs/dsv41.log'
+  'umask 077; python3 -m sglang.launch_server --model-path /models/dsv41 --tp 8 --trust-remote-code --host 0.0.0.0 --port 8000 --context-length 409600 --max-running-requests 128 --cuda-graph-max-bs-decode 128 --chunked-prefill-size 8192 --mem-fraction-static 0.85 --tool-call-parser auto --reasoning-parser auto --enable-metrics --api-key "$INFER_KEY" 2>&1 | sed -u "s/$INFER_KEY/[REDACTED]/g" >> /logs/dsv41.log'
 BASH
 ```
 
@@ -69,12 +81,12 @@ until curl -fsS localhost:8000/health >/dev/null; do sleep 15; done; echo health
 ```bash
 # NODE: test after healthy; source the key without printing it.
 set +x
-set -a; . ~/node.env; set +a
+INFER_KEY=$(cat ~/infer.key)
 curl -fsS localhost:8000/health
 curl -fsS localhost:8000/v1/chat/completions \
   -H @- -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash-1017","messages":[{"role":"user","content":"Say hi in five words."}],"max_tokens":32}' \
-  <<<"Authorization: Bearer $INFER_UPSTREAM_KEY"
+  -d '{"model":"/models/dsv41","messages":[{"role":"user","content":"Say hi in five words."}],"max_tokens":32}' \
+  <<<"Authorization: Bearer $INFER_KEY"
 ```
 
 ```bash

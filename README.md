@@ -212,15 +212,17 @@ in this research. NVIDIA's model-specific NIM guide instead uses its **SGLang**
 experimental image `nvcr.io/nim/nvidia/sglang-model-free-nim-experimental:2.1.6-variant-deepseek-v4.1-flash-1017`
 with a matching recipe; that is not evidence that TensorRT-LLM itself supports it.
 
-The kit's baseline is a conservative experiment, not a claim of optimal settings:
+The default SGLang capacity settings match the finalized max-TPS run on 8× B300.
+The vLLM preset remains a separate experiment. See [the live launch](docs/live-node.md)
+and [model naming, gateway mapping and public listing hold](docs/model-naming.md).
 
 | Setting | SGLang | vLLM |
 |---|---|---|
 | Parallelism | `--tp 8` | `--tensor-parallel-size 8` |
-| Capacity | `--max-running-requests 64` | `--max-num-seqs 64` |
-| Prefill | `--chunked-prefill-size 4096` | `--enable-chunked-prefill --max-num-batched-tokens 4096` |
-| Graph ceiling | `--cuda-graph-max-bs-decode 64` | `--compilation-config '{"max_cudagraph_capture_size":64}'` |
-| Memory/context | `--mem-fraction-static 0.80 --context-length 409600` | `--gpu-memory-utilization 0.80 --max-model-len 409600` |
+| Capacity | `--max-running-requests 128` | `--max-num-seqs 64` |
+| Prefill | `--chunked-prefill-size 8192` | `--enable-chunked-prefill --max-num-batched-tokens 4096` |
+| Graph ceiling | `--cuda-graph-max-bs-decode 128` | `--compilation-config '{"max_cudagraph_capture_size":64}'` |
+| Memory/context | `--mem-fraction-static 0.85 --context-length 409600` | `--gpu-memory-utilization 0.80 --max-model-len 409600` |
 | Auth/network | loopback :8000; inner argv fallback | loopback :8000; `VLLM_API_KEY` env |
 | Native chat | `--reasoning-parser auto --tool-call-parser auto` | `--tokenizer-mode deepseek_v41 --reasoning-parser deepseek_v41 --tool-call-parser deepseek_v41 --enable-auto-tool-choice` |
 
@@ -233,9 +235,8 @@ The [V4.1 cookbook's long-context section](https://docs.sglang.io/cookbook/autor
 emphasizes prefix reuse, KV offload and session affinity, with settings tied to
 specific hardware/topology/engine images. Its static examples of 16K/32K prefill
 and 0.70–0.85 memory fractions are AMD configurations, not a verified match for
-this eight-B300 409,600-context cell. Keep prefill **4096** and memory **0.80** as
-conservative unmeasured defaults; do not transplant AMD/offload flags. A long
-context cap does not reserve enough KV cache for 64 full-length prompts. Benchmark
+this eight-B300 409,600-context cell. The live SGLang run uses prefill **8192** and memory **0.85**; do not transplant AMD/offload flags. A long
+context cap does not reserve enough KV cache for 128 full-length prompts. Benchmark
 actual prompt lengths, cache reuse and memory before tuning or selling capacity.
 
 Keep KV dtype and kernel selection automatic: forcing FP8 KV would override this
@@ -252,7 +253,7 @@ collectives while EP redistributes experts, but adds routing/collective costs an
 changes cache placement. Keep the better measured TTFT/TPOT result. vLLM dp_ep is
 intentionally rejected until its topology is separately configured. Sweep graph
 ceilings and capacity together; the existing client sweep through 1024 streams
-now queues behind a **64-request** engine cap. A 1M architectural context does
+now queues behind a **128-request** SGLang engine cap. A 1M architectural context does
 not mean simultaneous full-length prompts fit. The default per-request cap is
 409,600 tokens, with prompt plus output constrained by engine memory.
 
@@ -319,7 +320,7 @@ For push, the relay/staging host **upload** rate is the bottleneck: the base
 checkpoint alone is about 68–70 min at 1 Gbit/s or 6.8–7 min at 10 Gbit/s; NVFP4
 is about 57 min at 1 Gbit/s. A nearby relay or NVFP4 can materially shorten staging.
 These are budgets, not provider
-promises. The long-context profile admits fewer concurrent requests (64 versus
+promises. The long-context profile admits fewer concurrent requests (128 for SGLang versus
 256); long prefills, cache pressure and compilation may change these allowances.
 The 409,600 cap is not a measured speed or cold-start claim. Xet/CDN throughput
 can be lower. A full 510 GB hash pass alone takes
@@ -364,8 +365,8 @@ both direct loopback and the public Worker separately before accepting customers
 ## Cost and revenue
 
 Assumed price: $4/GPU-hour × 8 = **$32/hour**, **$128 per four-hour window**.
-This is a scenario supplied for planning, not a grid quotation. The new 64-request
-long-context limit can reduce billable aggregate throughput; do not reuse results
+This is a scenario supplied for planning, not a grid quotation. The 128-request
+SGLang long-context limit can reduce billable aggregate throughput; do not reuse results
 from the optional 256-request throughput profile in these calculations. Throughput =
 **PLACEHOLDER until benchmarked**. No benchmark revenue is assumed.
 
@@ -419,7 +420,7 @@ The kit never sources `.env.example`; an empty name is not a secret-file templat
 | `WEIGHTS_S3_URI`, `S3_ENDPOINT_URL` | Existing mirror prefix; optional R2/S3-compatible endpoint; no credentials in URLs |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` | Environment credentials for s5cmd; no credential files shipped |
 | `ARTIFACT_S3_URI` | Optional artifact upload prefix; 90-second upload bound, local archive retained on failure |
-| `PROFILE` | longctx (409600/64/64) or throughput (32768/256/256); context/running/graph |
+| `PROFILE` | longctx (SGLang 409600/128/128; vLLM 409600/64/64) or throughput (32768/256/256); context/running/graph |
 | `MAC_NODE_ENV_FILE`, `NODE_ENV_FILE` | Mac ~/.config/b300/node.env; node ~/node.env; paths only, opaque copy + chmod 600 |
 | `RUN_ID`, `WINDOW_END`, `WINDOW_MINUTES` | Run ID; actual expiry epoch preferred; fallback 240 min from node bootstrap |
 | `PORT`, `GATEWAY_PORT`, `GATEWAY` | 8000 (required contract), 4000, none |
@@ -434,8 +435,8 @@ The kit never sources `.env.example`; an empty name is not a secret-file templat
 | `TARGET_TTFT_MS`, `TARGET_TPOT_MS` | 2000, 50; illustrative targets, not promised SLA |
 | `CONCURRENCY` | 16,32,64,128,256,512,1024 |
 | `OUTPUT_TOKENS`, `PROMPT_REPEATS`, `REQUESTS_PER_STREAM`, `REQUEST_TIMEOUT_SECONDS` | 256, 64, 2, 180; synthetic workload controls |
-| `MAX_RUNNING_REQUESTS`, `CHUNKED_PREFILL_SIZE`, `CUDA_GRAPH_MAX_BS` | 64, 4096, 64 |
-| `MEM_FRACTION`, `CONTEXT_LENGTH`, `PARALLELISM`, `SPECULATION` | .80, 409600, tp / dp_ep, none / dspark |
+| `MAX_RUNNING_REQUESTS`, `CHUNKED_PREFILL_SIZE`, `CUDA_GRAPH_MAX_BS` | SGLang: 128, 8192, 128; vLLM: 64, 4096, 64 |
+| `MEM_FRACTION`, `CONTEXT_LENGTH`, `PARALLELISM`, `SPECULATION` | SGLang .85 (vLLM .80), 409600, tp / dp_ep, none / dspark |
 | `ENGINE_EXTRA_ARGS_JSON` | JSON argv string array, no shell evaluation; do not include secrets |
 | `MIN_FREE_GB`, `HEALTH_TIMEOUT_SECONDS` | 650 budget minus existing shards; 2400 seconds, also bounded by window |
 | `HF_MAX_WORKERS`, `HF_XET_HIGH_PERFORMANCE`, `HASH_WORKERS` | 16, 1, 4 |

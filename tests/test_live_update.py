@@ -22,6 +22,7 @@ class LiveUpdateTests(unittest.TestCase):
     def test_profiles_generate_both_engine_commands(self):
         for engine in ('sglang', 'vllm'):
             for profile, context, running in (('longctx','409600','64'), ('throughput','32768','256')):
+                running = '128' if engine == 'sglang' and profile == 'longctx' else running
                 env = dict(os.environ, ENGINE=engine, PROFILE=profile, DRY_RUN='1')
                 for name in ('CONTEXT_LENGTH','MAX_RUNNING_REQUESTS','CUDA_GRAPH_MAX_BS','ENGINE_EXTRA_ARGS_JSON'):
                     env.pop(name, None)
@@ -124,11 +125,10 @@ python3 scripts/engine.py
             if 'tail -f' in block:
                 self.assertEqual(len([l for l in block.splitlines() if l and not l.startswith('#')]),1)
         launch=next(b for b in blocks if 'docker run' in b)
-        self.assertIn('-e INFER_UPSTREAM_KEY',launch)
+        self.assertIn('-e INFER_KEY',launch)
         self.assertIn('--log-driver none',launch)
-        self.assertIn('| python3 -u /redact.py >> /logs/dsv41.log',launch)
-        # Exercise the exact embedded redactor using fake startup output.
-        redactor=launch.split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
-        result=subprocess.run([sys.executable,'-c',redactor],input="api_key='fake-echo'\nBearer fake-bearer\nfixture-key\n",env=dict(os.environ,INFER_UPSTREAM_KEY='fixture-key'),capture_output=True,text=True)
+        self.assertIn('| sed -u "s/$INFER_KEY/[REDACTED]/g" >> /logs/dsv41.log',launch)
+        result=subprocess.run(['sed','-u','s/fixture-key/[REDACTED]/g'],
+                              input="api_key='fixture-key'\nfixture-key\n", capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
-        for value in ('fake-echo','fake-bearer','fixture-key'):self.assertNotIn(value,result.stdout)
+        self.assertNotIn('fixture-key',result.stdout)

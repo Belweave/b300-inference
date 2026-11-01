@@ -21,7 +21,7 @@ to it. Both direct transport and Netops' updated helper honor the claim's SSH
 
 ## Ready before up
 
-The engine binds **127.0.0.1:8000**. Bootstrap waits for these checks in order:
+The automated kit binds **127.0.0.1:8000**. Bootstrap waits for these checks in order:
 
 1. `GET http://127.0.0.1:8000/health` **without Authorization** → 200.
 2. Unauthenticated `GET /v1/models` → 401, then the same request with
@@ -165,3 +165,16 @@ semantics before using it for public traffic.
 * Replace accept-new with independently provisioned host keys where practical,
   and quote key paths safely (the helper's shell-word expansion mishandles spaces).
 * Supply the separate reverse-mode connector before enabling reverse serving.
+
+## Live launch and model identity
+
+The [live-node recipe](live-node.md) uses `0.0.0.0:8000` inside Docker with
+host port 8000 published on loopback for the tunnel. The running upstream serves
+`/models/dsv41`; authenticated direct model-list/chat checks must expect that name.
+The gateway advertises `deepseek-ai/DeepSeek-V4.1-Flash-1017` and maps it to
+`/models/dsv41`, while accepting the upstream name unchanged (including Hermes).
+The future clean restart uses the catalog served name and drops the gateway
+rename; see [the naming contract](model-naming.md). Netops owns gateway changes.
+The live key comes from `~/infer.key` and remains visible in container/process
+inspection. Sed redaction and Docker's `--log-driver none` protect logs only;
+see [the auth contract](auth-contract.md).
