@@ -1,0 +1,11 @@
+# Build BEFORE a rental. The preview tag moves; retain the produced image digest.
+ARG SGLANG_IMAGE=lmsysorg/sglang:dev-dsv41
+FROM ${SGLANG_IMAGE}
+COPY requirements-node.txt /opt/b300/requirements-node.txt
+RUN python3 -m pip install --no-cache-dir -r /opt/b300/requirements-node.txt \
+    && python3 -c "import aiohttp; import sglang.srt.server_args; import sglang.srt.parser.reasoning_parser; import sglang.srt.function_call.function_call_parser"
+COPY scripts/redact.py /opt/b300/redact.py
+RUN python3 -m compileall -q /opt/b300 \
+    && python3 -m sglang.launch_server --help > /opt/b300/sglang-help.txt
+# Parsers ship in SGLang; no model weights, secrets or customer prompts are baked.
+# GPU-specific compilation/graphs still happen on the target GPU at warm-up time.

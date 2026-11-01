@@ -13,7 +13,13 @@ METADATA = Path(__file__).resolve().parents[1]/'docs/model-metadata.json'
 
 
 def manifest(env):
-    data = json.loads(Path(env.get('MODEL_METADATA', METADATA)).read_text())['variants'][env.get('MODEL_VARIANT', 'fp8')]
+    if env.get('MODEL_VARIANT') == 'uncensored' and not env.get('MODEL_METADATA'):
+        pinned = json.loads((METADATA.parent.parent/'config/model-manifest.json').read_text())
+        data = {'model': pinned['model']['repo'], 'revision': pinned['model']['revision'],
+                'files': [dict(path=name, size=f['size'], sha256=f['sha256'], git_sha1=f['blob_id'])
+                          for name, f in pinned['files'].items()]}
+    else:
+        data = json.loads(Path(env.get('MODEL_METADATA', METADATA)).read_text())['variants'][env.get('MODEL_VARIANT', 'fp8')]
     if data['model'] != env['MODEL'] or data['revision'] != env['MODEL_REVISION'] or not data['files']:
         raise ValueError('Model/revision does not match the committed metadata')
     for f in data['files']:

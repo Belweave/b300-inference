@@ -2,11 +2,12 @@
 set -euo pipefail
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export KIT_ROOT
-export MODEL_VARIANT=${MODEL_VARIANT:-fp8}
+export MODEL_VARIANT=${MODEL_VARIANT:-uncensored}
 case "$MODEL_VARIANT" in
+    uncensored) default_model=dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8; default_revision=c19ca5ca4eaeb79d29fdf08aea8327da95b1116a ;;
     fp8) default_model=deepseek-ai/DeepSeek-V4.1-Flash-1017; default_revision=1bae0e1088993b9b82de08f59de5be5a34e42170 ;;
     nvfp4) default_model=nvidia/DeepSeek-V4.1-Flash-1017-NVFP4; default_revision=480550d349ede47a048eb65a276c5c01a06256e2 ;;
-    *) echo 'MODEL_VARIANT must be fp8 or nvfp4' >&2; exit 1 ;;
+    *) echo 'MODEL_VARIANT must be uncensored, fp8 or nvfp4' >&2; exit 1 ;;
 esac
 export MODEL=${MODEL:-$default_model}
 export MODEL_REVISION=${MODEL_REVISION:-$default_revision}

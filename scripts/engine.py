@@ -14,6 +14,17 @@ if e['ENGINE'] == 'sglang':
             '--chunked-prefill-size', e['CHUNKED_PREFILL_SIZE'],
             '--cuda-graph-max-bs-decode', e['CUDA_GRAPH_MAX_BS'],
             '--reasoning-parser', 'auto', '--tool-call-parser', 'auto', '--enable-metrics']
+    # Pinned source and installed-image validation: docs/sglang-warm-flags.md.
+    if e.get('WARM_GRAPH_BS'):
+        args += ['--cuda-graph-bs-decode', *e['WARM_GRAPH_BS'].split(',')]
+    if e.get('SCHEDULE_POLICY'):
+        args += ['--schedule-policy', e['SCHEDULE_POLICY']]
+    if e.get('ENABLE_CACHE_REPORT') == '1':
+        args += ['--enable-cache-report']
+    if e.get('HIERARCHICAL_CACHE') == '1':
+        args += ['--enable-hierarchical-cache']
+    if e.get('ENGRAM_HOST') == '1':
+        args += ['--engram-config', '{"placement":"cpu"}']
     if e['PARALLELISM'] == 'dp_ep':
         args += ['--attn-dp-size', '8', '--ep-size', '8']
     if e['SPECULATION'] == 'dspark':

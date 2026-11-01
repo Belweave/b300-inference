@@ -63,6 +63,7 @@ class WatcherFlowTests(unittest.TestCase):
                      SSH_DIRECTION='forward',FIRST_WINDOW='0',POLL_SECONDS='0',NODE_KIT_DIR='kit',WEIGHTS_SOURCE='hf')
             for name in ('RUN_ID','RELAY_HOST','IMAGE_SOURCE','DRY_RUN','MODEL_METADATA','MODEL','MODEL_REVISION','MODEL_VARIANT'):
                 env.pop(name,None)
+            env['MODEL_VARIANT']='fp8'
             result=subprocess.run(['/bin/bash',str(repo/'watcher/deploy.sh'),str(claim)],env=env,capture_output=True,text=True,timeout=15)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             events=[json.loads(line) for line in (base/'calls.jsonl').read_text().splitlines()]

@@ -1,0 +1,4 @@
+[
+  {"role":"system","content":"Operator-owned tool prompt placeholder: a fictional lookup_status tool accepts a job_id string. Explain the tool without calling it."},
+  {"role":"user","content":"What input would lookup_status need?"}
+]

@@ -165,6 +165,22 @@ Changing the public path to go through LiteLLM needs a revised Netops contract.
 
 ## Model facts
 
+The default is now `dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8`, pinned to
+`c19ca5ca4eaeb79d29fdf08aea8327da95b1116a`. The public HF API confirms the same
+DeepseekV41ForCausalLM architecture and MIT license. Its 48 shards total about
+510.30 GB; 27 shards differ from the pinned base (199.57 GB). Config, tokenizer
+and shard index are unchanged; `inference/kernel.py` differs and needs serving
+qualification. [Committed file hashes](config/model-manifest.json) drive offline
+verification and partial reuse. The original checkpoint remains available with
+`MODEL_VARIANT=fp8`; NVIDIA's variant remains `MODEL_VARIANT=nvfp4`.
+
+For the new node-only preparation path, read [warm cut-over](docs/cutover.md) and
+[confirmed/dropped flags](docs/sglang-warm-flags.md). `scripts/warm.sh` prepares a
+replacement, writes a deadline-gated ready signal and never flips the gateway.
+`scripts/measure.py` measures the running local engine. Neither has been run on
+B300 for this change. The architecture details below describe the base checkpoint
+shared by the derived build; they are not new throughput measurements.
+
 The [1017 card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017), raw
 config, file metadata, and full LICENSE were reachable. The release was posted
 October 17, 2026; the API reports no gate and 83 files. The pinned revision is
@@ -276,8 +292,8 @@ s5cmd with bounded file/multipart parallelism. Verified files are skipped; a
 partially copied S3 shard restarts. No mirror or volume is created automatically.
 
 `scripts/prestage.sh` downloads once to `STAGING_DIR/<variant>/weights` and exports
-an image under `STAGING_DIR/<variant>/images`. Set `MODEL_VARIANT=fp8` (default,
-DeepSeek mixed FP8/FP4 base) or `nvfp4` (official NVIDIA variant). It selects the
+an image under `STAGING_DIR/<variant>/images`. Set `MODEL_VARIANT=uncensored` (default), `fp8` (original mixed FP8/FP4
+base), or `nvfp4` (official NVIDIA variant). It selects the
 matching pinned revision automatically. `STAGING_PLATFORM=linux/amd64` prevents
 accidentally exporting a Mac-native ARM image; set linux/arm64 for an ARM node.
 The real prestage workflow is implemented but **was not run**; only its dry run
@@ -414,7 +430,7 @@ The kit never sources `.env.example`; an empty name is not a secret-file templat
 | `NODE_SSH_KEY_PATH`, `NODE_KIT_DIR` | Existing SSH identity path; remote relative kit path `b300-inference` |
 | `PROVIDER_API_TOKEN` | Reserved hook credential; no provider calls implemented |
 | `ACCOUNT_CONFIG`, `ACCOUNT_NAME`, `PROVIDER_HOOKS` | One nonsensitive account config; default config/account.env |
-| `MODEL_VARIANT`, `MODEL`, `MODEL_REVISION` | fp8 / nvfp4 chooses pinned model/revision; overrides must match committed metadata |
+| `MODEL_VARIANT`, `MODEL`, `MODEL_REVISION` | uncensored (default) / fp8 / nvfp4 chooses pinned model/revision; overrides must match committed metadata |
 | `ENGINE`, `ENGINE_IMAGE` | sglang or vllm; image defaults in config/ |
 | `WEIGHTS_SOURCE`, `WEIGHTS_DIR` | hf / mirror / push / volume; /data/weights/<model-repo-name> |
 | `WEIGHTS_S3_URI`, `S3_ENDPOINT_URL` | Existing mirror prefix; optional R2/S3-compatible endpoint; no credentials in URLs |

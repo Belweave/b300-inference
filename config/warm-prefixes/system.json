@@ -1,0 +1,4 @@
+[
+  {"role":"system","content":"You are a test assistant for this operator-owned synthetic warm-up. Answer briefly and clearly."},
+  {"role":"user","content":"Reply ready."}
+]

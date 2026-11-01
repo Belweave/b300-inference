@@ -1,0 +1,121 @@
+# Warm cut-over
+
+Default model: `dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8` at
+`c19ca5ca4eaeb79d29fdf08aea8327da95b1116a`. The committed
+[manifest](../config/model-manifest.json) was rechecked against the public HF API
+on 2026-11-01. All 48 shards total 510.30 GB. Exactly 27 (00013–00039) differ
+from the pinned base, totaling **199,573,008,344 bytes**. The other 21 can be
+hardlinked after verification. Shards 00047 and 00048 are about 101.5 GB each,
+likely Engram tables: a full download is dominated by those two individual files,
+so adding parallel shard workers alone cannot remove that bottleneck. Partial
+warm-up hardlinks them. Across filesystems, copying them adds local I/O time.
+
+All small non-shard files are fetched from the pinned uncensored revision and
+checked by SHA256/LFS or Git blob SHA1 plus size. README, two branding PNGs and
+`inference/kernel.py` differ; config, tokenizer and shard index are identical.
+The kernel change likely does not affect SGLang, which uses its own kernels,
+but needs runtime qualification. Base-only encoding README/output fixtures are
+not copied. The model is MIT, DeepseekV41ForCausalLM, mixed FP8/FP4 experts.
+
+## On the replacement node (operator action, not run by this PR)
+
+Export an existing upstream key and `WINDOW_END` (the **old node's** expiry).
+No credential files are sourced by these tools. With Python dependencies and
+Docker already installed, run `scripts/warm.sh`. It does not start a tunnel, flip
+a gateway, acquire GPUs or release allocations. It refuses an occupied local
+port 8000. The replacement node needs eight B300s and its own allocation lifetime.
+This is preparation on a separate node; do not run it on the serving node.
+
+Key knobs: `BAKED_IMAGE`, `BASE_WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41`),
+`WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41-uncensored`), `SHARD_WORKERS=16`,
+`HASH_WORKERS=4`, `MIN_MBPS=0` (decimal MB/s; measured over at least 10 seconds),
+`MEM_FRACTION=.85`, `CHUNKED_PREFILL_SIZE=8192`, `SCHEDULE_POLICY=lpm`,
+`ATTN_MODE=tp8|dp_ep`, `SPEC_DECODE=off`, `WARM_GRAPH_BS=1,2,4,8,16,32,64`,
+`HIERARCHICAL_CACHE=0`, `ENGRAM_TABLE_GB=203`, `ENGRAM_HEADROOM_GB=32`.
+MTP is deliberately rejected; see [flag evidence and dropped options](sglang-warm-flags.md).
+
+Bake `docker/Dockerfile.baked` before the rental, pin the result, and stage it
+locally as `BAKED_IMAGE`. A locally present baked image skips pulls; otherwise
+warm-up pulls it (or the preview image). Dependencies/native parser imports and
+redactor are baked; GPU weight loading, kernel compilation and graphs are not.
+The full kit directory remains mounted read-only for `engine.py` and stdin auth.
+The SGLang inner argv key exposure described in [auth-contract.md](auth-contract.md)
+still applies; Docker logging is disabled and captured streams are redacted.
+
+Image prep and weights overlap. Timings with epoch start/end and status are in
+`runs/warm-<timestamp>-<id>.json`; logs and ready file are in its sibling directory.
+The weights stage includes parallel streaming hashes, local verification and any
+copy. Initial verification still reads reused shards: pre-stage a verification
+run before a paid window when possible. Markers bind expected digest, size,
+mtime, ctime, inode and device; `FORCE_HASH=1` bypasses them. These markers assume
+operator-controlled, immutable storage, not hostile writers. Downloads replace
+files atomically and never write through existing hardlinks.
+
+Optional mirror: `MIRROR_URL/<revision>/manifest.json` must contain
+`{"revision":"<sha>","files":{"<shard>":{"sha256":"...","size":123}}}`
+with exactly the committed shard inventory and hashes. Any disagreement aborts.
+Shards are at `MIRROR_URL/<revision>/<filename>`. HF errors, bad hash/size or a
+speed below the floor trigger a per-shard mirror retry; the mirror is verified
+identically. Failed partial transfers restart that shard. Small files stay on HF.
+No credentials belong in URLs. Netops owns the mirror; this PR creates no bucket.
+Network timing records only Cloudflare `colo`/`loc` and bounded 8 MiB HF/R2 probe
+speeds, not IPs or URLs. Set `MIRROR_TEST_OBJECT` (default `speed-test.bin`) for R2.
+Probe throughput is a sample; transfer records contain actual full-shard speeds.
+
+## Budget (all estimates; no B300 measurements yet)
+
+| Step | Budget / bound |
+|---|---|
+| Image, already baked/local | 0–1 min; missing layers depend on image size/link |
+| Partial 199.57 GB at 1 / 10 / 25 Gbit/s | 26.61 / 2.66 / 1.06 min ideal; 38.01 / 3.80 / 1.52 at 70% |
+| Full 510.30 GB at 1 / 10 / 25 Gbit/s | 68.04 / 6.80 / 2.72 min ideal; 97.20 / 9.72 / 3.89 at 70% |
+| Hash verification | 1.7–8.5 min for full bytes at 5–1 GB/s; streaming hashes overlap transfers; unchanged markers skip reads |
+| Engram host table placement/load | 1–5 min planning allowance, to be measured; RAM gate may disable it |
+| Weight load / kernel compilation | 5–15 min, to be measured |
+| CUDA graph capture | 1–5 min, to be measured; seven small decode sizes |
+| Health, 1-token and streaming checks | 0.2–1 min after engine is serving |
+| Operator-owned prefix replay | 0.1–1 min for supplied tiny placeholders |
+
+Image and transfer wall time overlap; table/weight loading may overlap internally,
+so do not sum those startup estimates as measured phases. The timing log records
+the combined load/graph/health wall time; engine startup logs are needed to split
+it further. **15–20 minutes is a target only** with baked images, partial reuse,
+fast verified local storage, cached verification and a nearby sustained 10–25
+Gbit/s source. It is impossible for partial transfer alone at 1 Gbit/s. Full cold
+loads, remote 101 GB shards or cross-device copies can exceed it even at 10 Gbit/s.
+
+## Gateway contract
+
+Success atomically writes `runs/warm-<id>/ready.json` and prints one
+`READY <JSON>` line. Schema 1 contains `state`, `model`, `revision`, `ready_epoch`,
+`deadline_epoch`, `container`, `timing_file`. Netops must independently probe the
+new origin through its route before flipping. A PID or ready file alone is not
+proof of public reachability. No ready signal is emitted after
+`WINDOW_END - 13 minutes`; failure removes any new ready file and stops only the
+new warm container. File hashes/copies can finish after the deadline, but late
+completion cannot become ready. Arrange rental expiry cleanup independently.
+
+Flip **by WINDOW_END−13 min**. JIT start recommendation is that flip deadline minus
+measured warm duration minus five minutes (equivalently old expiry minus 13 min,
+warm duration and 5 min). Once flipped, stop old-node admission and drain until
+`min(flip_time + DRAIN_CAP, WINDOW_END - 3 min)`, with DRAIN_CAP default **1200
+seconds** (20 min). This is an absolute stop time, not epoch seconds used as a
+duration. `warm_logic.drain_until` implements the arithmetic; Netops applies it.
+The existing standalone kit's T−10 min teardown is a different lifecycle: a
+coordinated cut-over must configure its deadline/drain policy explicitly. These
+tools do not silently override an existing node's timer.
+
+## Noon measurement
+
+Run `python3 scripts/measure.py --warm-report runs/warm-<id>.json --log
+runs/warm-<id>/engine.log --output runs/noon-tp8` on the prepared node. It reports
+local sweeps at 1/8/16/32/64 streams, TTFT, decode tok/s, aggregate input/output
+rates, cached-token rate, errors, network probes, and a 16/32/48/64 by
+100K/250K/400K pool-fit table with 10% headroom. Missing pool/bytes/cache fields
+remain unknown; multiple DP pool lines use the minimum, never an assumed sum.
+
+An operator separately prepares a DP/EP run, then uses `--compare` on the two
+JSON reports. Comparison rejects extra changed engine knobs/model/workload. MTP
+is unavailable rather than fabricated. This tool never restarts an engine.
+The fixed synthetic prompt measures cache reuse; it is not a diverse workload
+SLA. Prefix files contain only our own placeholders, never customer prompts.

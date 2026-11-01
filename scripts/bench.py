@@ -24,7 +24,7 @@ async def request(session, sequence):
     payload = {
         'model': os.environ['MODEL'], 'stream': True, 'stream_options': {'include_usage': True},
         'max_tokens': int(os.environ.get('OUTPUT_TOKENS', '256')), 'temperature': 0,
-        'messages': [{'role': 'user', 'content': f'Unique case {uuid.uuid4()} {sequence}. '+
+        'messages': [{'role': 'user', 'content': ('Operator-owned fixed prefix. ' if os.environ.get('BENCH_FIXED_PROMPT') == '1' else f'Unique case {uuid.uuid4()} {sequence}. ')+
                       ' '.join(['Describe the tradeoffs of batching requests in a server.'] * int(os.environ.get('PROMPT_REPEATS', '64')))}],
     }
     try:
@@ -58,6 +58,7 @@ async def request(session, sequence):
         return {'ok': True, 'ttft_ms': (first-start)*1000,
                 'tpot_ms': (last-first)*1000/(n-1), 'output_tokens': n,
                 'input_tokens': usage.get('prompt_tokens', 0),
+                'cached_tokens': (usage.get('prompt_tokens_details') or {}).get('cached_tokens'),
                 'decode_tokens_s': (n-1)/(last-first), 'end_to_end_tokens_s': n/(last-start),
                 'sse_content_events': chunks}
     except Exception as exc:
