@@ -1,0 +1,18 @@
+{
+  "observed_date": "2026-10-31",
+  "source": "https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4.1-Flash-1017?blobs=true",
+  "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+  "created_at": "2026-10-17T02:40:38.000Z",
+  "gated": false,
+  "file_count": 83,
+  "all_file_bytes": 510311045295,
+  "safetensors": {
+    "parameters": {
+      "BF16": 1976441856,
+      "F32": 42307282,
+      "F8_E4M3": 204015223296,
+      "I8": 557171343360
+    },
+    "total": 763205315794
+  }
+}

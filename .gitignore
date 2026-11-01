@@ -1,0 +1,13 @@
+.env*
+!.env.example
+logs/
+runs/
+status.json
+*.status.json
+*.tar.gz
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+watcher/accounts.local
+config/account.env

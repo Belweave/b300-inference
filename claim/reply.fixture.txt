@@ -1,0 +1,2 @@
+TODO: replace with a sanitized real national compute grid portal reply.
+No invented response syntax. No host credentials, inline private keys, or tokens.

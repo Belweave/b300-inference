@@ -1,0 +1,10 @@
+model_list:
+  - model_name: os.environ/MODEL
+    litellm_params:
+      model: os.environ/LITELLM_UPSTREAM_MODEL
+      api_base: os.environ/LITELLM_UPSTREAM_URL
+      api_key: os.environ/INFER_UPSTREAM_KEY
+litellm_settings:
+  set_verbose: false
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

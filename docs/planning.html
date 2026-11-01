@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+body{font-family:var(--font-sans,system-ui);color:var(--foreground);margin:0}h3{font-size:15px;margin:16px 0 8px}p,small{color:var(--muted-foreground);font-size:12px}.row{display:grid;grid-template-columns:70px 1fr 80px;gap:10px;align-items:center;margin:9px 0;font-size:13px}.bar{height:20px;background:var(--chart-1,#4786ff);border-radius:3px}.cost{background:var(--chart-2,#43ae95)}.plot{height:118px}.costplot{height:170px}</style></head><body>
+<h3>510.311 GB transfer: planning at 70% link utilization</h3><div class="plot">
+<div class="row"><span>1 Gbit/s</span><div class="bar" style="width:100%"></div><span>97.20 min</span></div>
+<div class="row"><span>10 Gbit/s</span><div class="bar" style="width:10%"></div><span>9.72 min</span></div>
+<div class="row"><span>25 Gbit/s</span><div class="bar" style="width:4%"></div><span>3.89 min</span></div></div>
+<h3>Break-even output throughput at 200 serving minutes</h3><div class="costplot">
+<div class="row"><span>$0.25 / M</span><div class="bar cost" style="width:100%"></div><span>42,667 t/s</span></div>
+<div class="row"><span>$0.50 / M</span><div class="bar cost" style="width:50%"></div><span>21,333 t/s</span></div>
+<div class="row"><span>$1.00 / M</span><div class="bar cost" style="width:25%"></div><span>10,667 t/s</span></div>
+<div class="row"><span>$2.00 / M</span><div class="bar cost" style="width:12.5%"></div><span>5,333 t/s</span></div>
+<div class="row"><span>$5.00 / M</span><div class="bar cost" style="width:5%"></div><span>2,133 t/s</span></div></div>
+<p>Planning arithmetic, not benchmark results. Cost: $128/window; 30 min cold start + 10 min teardown; zero input revenue. Excludes storage, egress, and platform costs.</p>
+</body></html>
