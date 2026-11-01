@@ -187,10 +187,11 @@ class Relay:
 
 
 class SafetyRelay(Relay):
-    def __init__(self, upstream, heartbeat, config, classifier=None):
+    def __init__(self, upstream, heartbeat, config, classifier=None, scorer=None):
         super().__init__(upstream, heartbeat)
         import safety
         self.safety, self.config, self.classifier = safety, config, classifier
+        self.scorer = scorer
         self.safety_session = None
         self.inflight = None
 
@@ -199,8 +200,12 @@ class SafetyRelay(Relay):
         self.inflight = self.safety.inflight_semaphore(self.config.max_inflight)
         self.safety_session = ClientSession(timeout=ClientTimeout(total=self.config.timeout_seconds),
                                             connector=TCPConnector(limit=0), trust_env=False)
-        if self.classifier is None:
-            self.classifier = self.safety.ShieldstralClassifier(self.config, self.safety_session)
+        if self.scorer is None:
+            if self.classifier is None:
+                self.classifier = self.safety.ShieldstralClassifier(self.config, self.safety_session)
+            output = (self.safety.Qwen3GuardClassifier(self.config, self.safety_session)
+                      if self.config.output_guard == 'qwen3guard' else self.classifier)
+            self.scorer = self.safety.SafetyScorer(self.config, self.classifier, output, self.classifier)
 
     async def stop(self, app):
         await self.safety_session.close()
@@ -228,7 +233,7 @@ class SafetyRelay(Relay):
 
         async def bounded_score():
             async with self.inflight:
-                return await self.safety.score_text(self.classifier, body['text'], body['phase'])
+                return await self.safety.score_text(self.scorer, body['text'], body['phase'])
 
         try:
             # Queue time counts toward the same per-call deadline as model time.
@@ -242,7 +247,7 @@ class SafetyRelay(Relay):
         return web.json_response({'error': 'not found'}, status=404)
 
 
-def make_app(upstream, heartbeat=15.0, safety_config=None, classifier=None):
+def make_app(upstream, heartbeat=15.0, safety_config=None, classifier=None, scorer=None):
     flag = os.environ.get('SAFETY', '0')
     if flag not in ('0', '1'):
         raise ValueError('SAFETY must be 0 or 1')
@@ -250,7 +255,7 @@ def make_app(upstream, heartbeat=15.0, safety_config=None, classifier=None):
         from safety import SafetyConfig
         safety_config = SafetyConfig.from_env(os.environ)
     if safety_config is not None and safety_config.enabled:
-        relay = SafetyRelay(upstream, heartbeat, safety_config, classifier)
+        relay = SafetyRelay(upstream, heartbeat, safety_config, classifier, scorer)
     else:
         relay = Relay(upstream, heartbeat)
     app = web.Application(client_max_size=512 * 1024 * 1024)

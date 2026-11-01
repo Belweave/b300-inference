@@ -31,23 +31,31 @@ Survey as of Nov 2026:
 | Nemotron Safety Guard 8B v3 | 8B | NVIDIA open | Has a distinct **"Sexual (minor)"** category | Category selection | 8B text guard |
 | SafeCircle Vigil | 322M | SafeCircle Research (no commercial use) | 7 child-risk categories | n/a | Research checkpoint, 12–19% FPR on unseen text; **license blocks commercial use** — rejected |
 
-**Recommendation: Shieldstral 1.0 3B (Apache-2.0), primary.** Reasons:
-1. True single-category custom policy — we write one yes/no query for exactly "sexual content involving a minor", so nothing else can be blocked. That matches the policy better than any fixed-taxonomy guard.
+**Approved architecture (Kai, Nov 1): two guards, defense in depth. Both score ONLY the single minors+sexual category; nothing else is ever blocked.**
+
+**Input guard — Shieldstral 1.0 3B (Apache-2.0).** Reasons:
+1. True single-category custom policy — we write one yes/no query for exactly "sexual content involving a minor", so nothing else can be blocked. Better than any fixed-taxonomy guard.
 2. Apache-2.0: clean commercial self-hosting, no MAU clause, no copyleft.
-3. One forward pass, one token + logprobs → a continuous score we can threshold. Lowest-overhead decision shape, ~16 GB BF16 on one GPU.
-4. Serves on the same SGLang stack we already run, OpenAI-compatible, so the node client is a plain /v1/chat/completions call.
-5. Published eval F1 is at or above the larger guards on the benchmarks that matter here (prompt/response harm, UnsafeBench).
+3. One forward pass, one token + logprobs → a continuous score we can threshold.
+4. Serves on the same SGLang stack, OpenAI-compatible, plain `/v1/chat/completions`.
+5. Published F1 is at or above the larger guards on the relevant benchmarks.
 
-**Secondary / defense-in-depth option for Preetham to weigh:** add **Qwen3Guard-Stream (0.6B)** on the output path for true token-level streaming detection (it was built to judge each generated token in real time), with Shieldstral as the primary input+output policy judge. This is optional; the baseline below uses Shieldstral for both input and rolling-output checks to keep one model and one policy. gpt-oss-safeguard-20b is the fallback if Shieldstral's single-category recall proves weak in the eval.
+**Output guard — Qwen3Guard-Gen 0.6B (Apache-2.0), confirmed by the Shieldstral minors policy.** On the output path (`phase=output`) the fast 0.6B Qwen3Guard runs first as a sexual-content detector; **only its `Sexual Content or Sexual Acts` category is read**, mapped to a severity score (Unsafe→1.0, Controversial→0.5, else 0). If it clears the Qwen threshold, the **Shieldstral minors policy confirms**, and the request is blocked **only when that minors policy agrees**. So Qwen never blocks on its own — adult sexual content and every other category pass. This adds a second, cheaper detector on generated text without widening what is blocked.
 
-> The classifier is itself an abliteration-free, safety-tuned model; it is never the abliterated serving model.
+> **Gen, not Stream — honest note.** Our node endpoint is stateless (text in → decision out, per the gateway contract), so the output guard is backed by the OpenAI-compatible **Qwen3Guard-Gen-0.6B**. The token-level **Qwen3Guard-Stream** head needs a custom per-token harness; it is the right future optimization for the gateway's rolling per-chunk output calls, not for a stateless scorer. True per-token streaming latency is already realized by the gateway making rolling `phase=output` calls to this endpoint.
 
-## 3. Placement and memory cost
+`SAFETY_OUTPUT_GUARD=shieldstral` falls back to the single-model behavior (Shieldstral on both paths). gpt-oss-safeguard-20b remains the fallback if Shieldstral single-category recall proves weak in the eval.
 
-- Separate engine, **not** in the serving model's process. Run Shieldstral as its own SGLang server bound to **127.0.0.1:8600** (loopback only; never a public port).
-- GPU: the 8×B300 node has large HBM per GPU; the serving model is TP8 across all eight. Put the classifier on a **small slice of one GPU** (MPS or a MIG-style partition) rather than a ninth device. BF16 weights ≈ 8 GB (3B) / ~16 GB with activations + a small KV cache for short classification sequences. Budget **~16–20 GB on one GPU**, taken from that GPU's share of `MEM_FRACTION` headroom — measure the real fit in the noon window before trusting it.
-- CPU-only fallback exists but is too slow for inline per-request + per-chunk checks at 64–128 concurrent streams; GPU slice is the plan.
-- The classifier adds VRAM pressure that competes with the serving model's KV pool. This must be accounted for in the 128-vs-64 fit check (see `warm_logic.concurrency_fit`): the classifier's reservation reduces pool headroom, so enabling SAFETY may shift the memory-fit fallback. Flagged as an open question to measure.
+> Both guards are abliteration-free, safety-tuned models; neither is the abliterated serving model.
+
+## 3. Placement and memory cost (serve-plan note)
+
+- **Two separate guard engines, loopback only, never in the serving model's process and never on a public port:**
+  - Shieldstral 1.0 3B (input + confirm) on **127.0.0.1:8600** — BF16 weights ≈ 8 GB, ~16 GB with activations + a small KV cache for short classification sequences.
+  - Qwen3Guard-Gen 0.6B (output first-pass) on **127.0.0.1:8601** — ≈ 1.6 GB BF16, a few GB with activations/KV.
+- GPU: the serving model is TP8 across all eight B300s. Put both guards on a **small slice of one GPU** (MPS or a MIG-style partition) rather than extra devices. Budget **~20–24 GB on one GPU** for the pair, taken from that GPU's share of `MEM_FRACTION` headroom — **measure the real fit on B300 before trusting it (untested).**
+- CPU-only is too slow for the gateway's ~130 output calls/s under the 100 ms p99 budget; a GPU slice is the plan.
+- **Serve-plan impact:** the guards' reservation competes with the serving model's KV pool, so it must be subtracted from the pool headroom the 128-vs-64 fit check (`warm_logic.concurrency_fit`) sees. Enabling `SAFETY=1` can therefore shift the memory-fit fallback toward 64. This doc does **not** change the fit math (serving behavior); the reservation must be wired and measured in a bring-up window before any guard runs alongside the model. Flagged open.
 
 ## 4. Division of labor (gateway contract)
 
@@ -66,7 +74,7 @@ Content-Type: application/json
 {"text": "<utf-8 text>", "phase": "input" | "output"}
 ```
 Success is **HTTP 200 only**, body `{"flag": true|false, "score": <finite number, higher = riskier>, "model": "<id@revision>"}`:
-- `flag` is the decision — the **node** applies the threshold (default 0.5 on Shieldstral's renormalised yes/no score). The gateway does not threshold; it records the score in sealed evidence and keeps the highest.
+- `flag` is the decision — the **node** applies the threshold. **`phase` selects the backend:** `input` → Shieldstral minors policy (default 0.5 on the renormalised yes/no score); `output` → Qwen3Guard-Gen reads only its sexual category, and a hit is confirmed by the Shieldstral minors policy, which is what `flag` reflects (the reported `score` is that confirming minors score). `SAFETY_OUTPUT_GUARD=shieldstral` makes `output` use the minors policy directly. The gateway does not threshold; it records the score in sealed evidence and keeps the highest.
 - `model` identifies the classifier + version, e.g. `mistralai/Shieldstral-1.0-3B@<policy_version>`, so evidence is auditable to an exact classifier+policy.
 - The gateway **fails closed** on anything that is not a clean 200 of that shape. So the node returns a non-200 rather than guessing: **503** on classifier error/timeout/unavailability, **401** on bad/missing auth, **400** on a malformed body or bad `phase`, **405** on non-POST, **404** on other `/v1/safety/*`. The text is never echoed back.
 - **Canary:** the synthetic token `CANARY-CSAM-TEST-7f3a` makes the endpoint return `200 {flag:true}` **without calling the model**, so an end-to-end drill works even if the model is down. This is the only trigger; no real content exists anywhere in the code or tests.
@@ -85,6 +93,9 @@ All evidence handling moved to the gateway per the contract. For the record, the
 
 `SAFETY` (0/1), `SAFETY_URL` (classifier engine, loopback-only), `SAFETY_MODEL`, `SAFETY_MODEL_REVISION` (folds into the `model` id the endpoint returns; defaults to the policy version), `SAFETY_THRESHOLD`, `SAFETY_TIMEOUT_SECONDS` (default 3 s, matching the gateway), `SAFETY_MAX_INFLIGHT` (default 128), `SAFETY_CLASSIFIER_KEY` (optional; when set the `/v1/safety/csam` endpoint requires `Authorization: Bearer` it; separate from the inference key; never logged). The node runs the Shieldstral classifier engine as a prerequisite; `age`/evidence are gateway-side now, not a node dependency.
 
+
+**Output guard (Qwen3Guard):** `SAFETY_OUTPUT_GUARD` (`qwen3guard` default / `shieldstral`), `SAFETY_QWEN_URL` (loopback, default `http://127.0.0.1:8601`), `SAFETY_QWEN_MODEL` (default `Qwen/Qwen3Guard-Gen-0.6B`), `SAFETY_QWEN_REVISION`, `SAFETY_QWEN_THRESHOLD` (default 0.5 — severity at/above which Qwen's sexual signal triggers the Shieldstral confirm). `SAFETY_CLASSIFIER_KEY` is generated by Netops and kept in their secrets; the node reads it from env and never prints it.
+
 ## 9. Test plan
 
 **Unit (in this PR, fully offline, mocked classifier, inert canary only).**
@@ -95,15 +106,20 @@ All evidence handling moved to the gateway per the contract. For the record, the
 - `SAFETY=0` leaves the relay path byte-for-byte untouched (reuses the existing relay fixtures).
 - A short in-process **load test** (`scripts/safety_loadtest.py`, also exercised as a unit test) drives the endpoint with a **mocked-latency** classifier at ~130 rps / 128 concurrency and asserts zero non-200s and p99 under the 100 ms budget. This measures endpoint/relay overhead + injected latency, **not** real model latency.
 
-**Red-team / real-model eval (plan only; needs Preetham + counsel approval; download nothing now).**
+**Red-team eval harness (`scripts/safety_eval.py`, in this PR, offline).**
+- Scores a labeled JSONL dataset `{text, phase, expected}` through `score_text` and reports precision/recall/FPR/FNR + a confusion matrix **per phase**; it is a **pre-deploy gate** — exits non-zero if recall < `--min-recall` (default 0.99) or FPR > `--max-fpr` (default 0.02).
+- **The repo contains no real eval data.** It ships only a tiny built-in synthetic fixture using inert placeholders (`TEST_TRIGGER_CSAM_PLACEHOLDER`, `CANARY-CSAM-TEST-7f3a` as positives; benign/topic-label negatives). Real, access-controlled data is plugged in later via `--dataset <path outside the repo>`; the harness refuses in-repo datasets and never prints or writes any example's raw text.
+- Default backend is a **mock scorer** (marker/canary → flag), so it runs in CI with no model; `--live` (not run here) would point at the loopback guard engines.
+
+**Real-model eval (plan only; needs Preetham + counsel approval; download nothing now).**
 - Measure recall (missed blocks) and false-block rate on **vetted, access-controlled benchmark sets**, used strictly under their terms — the classifier vendor's published safety eval sets, standard academic guard benchmarks (WildGuard, Aegis v2, UnsafeBench), and any NCMEC/industry-sanctioned evaluation corpus. **We never create, fetch, or store sexual content involving minors.** Benign "false-positive bait" (adult, medical, parenting, abuse-prevention, coding) plus the abstract canary drive our own in-repo set.
 - Threshold tuning from the FP/FN curve.
 - **End-to-end drill before any non-Preetham key exists:** firing the canary through the gateway must demonstrably (1) block the request, (2) kill the key, (3) set the global kill flag, (4) seal encrypted evidence, (5) fire the Notify alert — proven once, start to finish, across gateway + node.
-- Real Shieldstral latency/throughput at 64–128 concurrent streams against the p99 < 100 ms budget, and the VRAM hit to the serving KV pool.
+- Real Shieldstral + Qwen3Guard latency/throughput at 64–128 concurrent streams against the p99 < 100 ms budget (the output path can cost a Qwen call plus a Shieldstral confirm on a flag), and the combined VRAM hit to the serving KV pool.
 
 ## 10. Honest timing (per component)
 
-- Node `/v1/safety/csam` endpoint + relay route + unit tests + mocked load test (this PR): **drafted today**, ~0.5–1 day to review/harden.
+- Node `/v1/safety/csam` endpoint + relay route + **dual-guard routing (Shieldstral input, Qwen3Guard output + Shieldstral confirm)** + red-team eval harness + unit tests + mocked load test (this PR): **drafted today**, ~0.5–1 day to review/harden.
 - Gateway enforcement — key-kill, global kill flag (fail-closed default), text extraction/windowing, R2 object-lock WORM evidence, NCMEC alert — **Netops**, draft on branch `safety-csam-block`; ~1–2 days to finish + verify.
 - Shieldstral classifier actually served on the node + real latency/VRAM fit: part of a bring-up window; single-GPU-slice serving and the p99 target are **not proven on B300**.
 - Threshold tuning + red-team eval + the end-to-end drill: ~1 day **after** approvals and eval-data access.
@@ -115,8 +131,8 @@ All evidence handling moved to the gateway per the contract. For the record, the
 
 **For Preetham:**
 1. Enforce-before-serve (option a) vs. take the /policy/safety claim down until the block is live and drilled (option b)? Recommendation: do (b) now (≈15-min site edit), keep only your key, restore the page after the drill passes (a).
-2. Which model: Shieldstral 3B only, or add Qwen3Guard-Stream 0.6B on the output path for token-level streaming (defense in depth, more VRAM)?
-3. Stage thresholds and how aggressive the output cadence is (latency vs. leakage of partial tokens before a mid-stream block).
+2. Output guard confirmed as Qwen3Guard-Gen 0.6B + Shieldstral confirm. Later: upgrade to the token-level Qwen3Guard-Stream head on the gateway path, and/or larger Qwen (4B/8B) if 0.6B recall is weak?
+3. Stage thresholds: the Shieldstral input/confirm threshold and the Qwen first-pass threshold (recall vs. false blocks and vs. the extra confirm latency), plus how aggressive the gateway output cadence is (latency vs. partial-token leakage before a mid-stream block).
 4. Scope confirm: image inputs — block now (route images through a multimodal guard) or text-only first and reject image parts while SAFETY=1?
 5. The `CLASSIFIER_KEY` secret value (node + gateway share it; set via a masked secret card, never in chat) and the age public recipients file path for the gateway evidence store.
 

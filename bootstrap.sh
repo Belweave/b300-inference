@@ -178,7 +178,8 @@ p.joinpath('runtime.json').write_text(json.dumps({'image':os.environ['ENGINE_IMA
 PYMETA
 phase relay
 if [[ $SSE_RELAY == 1 ]]; then
-    # SAFETY=1 requires a node-local Shieldstral engine; the relay exposes /v1/safety/csam.
+    # SAFETY=1 defaults to TWO guard engines: Shieldstral input + Qwen3Guard-Gen output.
+    # Both loopback engines are prerequisites; the relay exposes /v1/safety/csam.
     # Evidence sealing belongs to the gateway.
     # Tunnel ingress stays http://127.0.0.1:8000; the relay owns it and the engine moves to ENGINE_PORT.
     [[ $ENGINE_PORT != "$PORT" ]] || die 'SSE_RELAY=1 requires ENGINE_PORT different from PORT'
@@ -186,7 +187,9 @@ if [[ $SSE_RELAY == 1 ]]; then
     if [[ ! -f $RUN_DIR/relay.pid ]] || ! kill -0 "$(cat "$RUN_DIR/relay.pid")" 2>/dev/null; then
         relay_safety_env=()
         for name in SAFETY SAFETY_URL SAFETY_MODEL SAFETY_MODEL_REVISION SAFETY_THRESHOLD \
-                    SAFETY_TIMEOUT_SECONDS SAFETY_MAX_INFLIGHT SAFETY_CLASSIFIER_KEY; do
+                    SAFETY_TIMEOUT_SECONDS SAFETY_MAX_INFLIGHT SAFETY_CLASSIFIER_KEY \
+                    SAFETY_OUTPUT_GUARD SAFETY_QWEN_URL SAFETY_QWEN_MODEL \
+                    SAFETY_QWEN_REVISION SAFETY_QWEN_THRESHOLD; do
             [[ ! -v $name ]] || relay_safety_env+=("$name=${!name}")
         done
         # Inference Authorization passes through; classifier auth has its own optional key.

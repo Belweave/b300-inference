@@ -60,7 +60,8 @@ async def run_load_test(rps=130.0, concurrency=128, duration_seconds=5.0,
         raise ValueError('concurrency must be a positive integer')
     config = safety.SafetyConfig(enabled=True, model='mock', model_revision='offline-v1')
     classifier = MockClassifier(config, mock_latency_ms, mock_p99_ms)
-    app = sse_relay.make_app('http://127.0.0.1:1', safety_config=config, classifier=classifier)
+    scorer = safety.SafetyScorer(config, classifier, classifier, classifier)
+    app = sse_relay.make_app('http://127.0.0.1:1', safety_config=config, scorer=scorer)
     server = TestServer(app, host='127.0.0.1', handler_cancellation=True)
     client = TestClient(server, connector=TCPConnector(limit=concurrency),
                         timeout=ClientTimeout(total=config.timeout_seconds + 1), trust_env=False)
@@ -83,7 +84,8 @@ async def run_load_test(rps=130.0, concurrency=128, duration_seconds=5.0,
                         await response.read()
                     else:
                         body = await response.json()
-                        expected = {'flag': canary, 'score': 1.0 if canary else 0.01, 'model': config.model_id}
+                        model = config.model_id if phase == 'input' else config.qwen_model_id
+                        expected = {'flag': canary, 'score': 1.0 if canary else 0.01, 'model': model}
                         if body != expected:
                             invalid_responses += 1
         except (ClientError, OSError, asyncio.TimeoutError, ValueError):
