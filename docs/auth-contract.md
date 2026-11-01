@@ -71,13 +71,15 @@ archive member through `redact.py`. Env files, keys, symlinks and incoming image
 archives are excluded. Scratch storage contains filtered bytes only. Fake-key
 tests exercise stdout/stderr capture and inspect every tar member.
 
-The [live-node block](live-node.md) reads `~/infer.key` into `INFER_KEY`,
-passes it through Docker environment and supplies `--api-key "$INFER_KEY"`.
+The [live-node block](live-node.md) sources `~/node.env` and passes
+`INFER_UPSTREAM_KEY` through Docker environment to `--api-key`. This must be the
+same upstream key configured in the gateway; no separate key file is used.
 SGLang has no env/file option for this flag. The key is visible through Docker
 inspect and node process args (`ps`); root and Docker access remain trusted.
-Its in-container `sed -u "s/$INFER_KEY/[REDACTED]/g"` filters stdout/stderr into
-`/logs/dsv41.log`, with `--log-driver none` preventing raw Docker log retention.
-These measures protect logs only, not process arguments or container metadata.
-Use a key compatible with the sed expression as described in the live block.
-The vendor tunnel helper's raw `/tmp/cloudflared.log` caveat still applies.
+The kit's `scripts/redact.py` is copied to the node and mounted at `/redact.py`.
+`python3 -u /redact.py` filters stdout/stderr into `/logs/dsv41.log`, using literal
+secret replacement plus API-key-field and Bearer masking. `--log-driver none`
+prevents raw Docker log retention. These measures protect logs only, not process
+arguments or container metadata. The vendor tunnel helper's raw
+`/tmp/cloudflared.log` caveat still applies.
 See [model naming](model-naming.md) for the gateway alias contract.

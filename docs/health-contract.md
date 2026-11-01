@@ -41,6 +41,6 @@ The gateway advertises `deepseek-ai/DeepSeek-V4.1-Flash-1017` and maps it to
 `/models/dsv41`, while accepting the upstream name unchanged (including Hermes).
 The future clean restart uses the catalog served name and drops the gateway
 rename; see [the naming contract](model-naming.md). Netops owns gateway changes.
-The live key comes from `~/infer.key` and remains visible in container/process
-inspection. Sed redaction and Docker's `--log-driver none` protect logs only;
+The live key is `INFER_UPSTREAM_KEY` from `~/node.env` and remains visible in container/process
+inspection. The kit's Python redactor and Docker's `--log-driver none` protect logs only;
 see [the auth contract](auth-contract.md).

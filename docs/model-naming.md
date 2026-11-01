@@ -1,7 +1,9 @@
 # Model naming and gateway contract
 
-The public/catalog model ID for OpenRouter, models.dev, LiteLLM and the gateway's
-`/v1/models` listing is `deepseek-ai/DeepSeek-V4.1-Flash-1017`.
+The canonical model ID for catalog integrations (OpenRouter, models.dev,
+LiteLLM) and the gateway's `/v1/models` listing is
+`deepseek-ai/DeepSeek-V4.1-Flash-1017`. OpenRouter submission is postponed;
+this ID does not imply an active public listing.
 The model is MIT licensed, allowing paid commercial hosting; this does not grant
 commercial-use rights to the underlying compute allocation.
 
@@ -32,4 +34,5 @@ Gateway, metering, per-key limits and terms/privacy are being built. External
 public listing (OpenRouter and similar catalogs) is **ON HOLD** pending Preetham's
 personal review of the national compute grid's resale/commercial-use terms
 (the node is .edu grid time) and resolution of the four-hour-window uptime
-limitation. Private/own-agent use through the gateway is unaffected.
+limitation. No catalog or public submission goes out without Preetham's explicit
+go. Private/own-agent use through the gateway is unaffected.

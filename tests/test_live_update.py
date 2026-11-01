@@ -125,10 +125,20 @@ python3 scripts/engine.py
             if 'tail -f' in block:
                 self.assertEqual(len([l for l in block.splitlines() if l and not l.startswith('#')]),1)
         launch=next(b for b in blocks if 'docker run' in b)
-        self.assertIn('-e INFER_KEY',launch)
+        self.assertIn('-e INFER_UPSTREAM_KEY',launch)
         self.assertIn('--log-driver none',launch)
-        self.assertIn('| sed -u "s/$INFER_KEY/[REDACTED]/g" >> /logs/dsv41.log',launch)
-        result=subprocess.run(['sed','-u','s/fixture-key/[REDACTED]/g'],
-                              input="api_key='fixture-key'\nfixture-key\n", capture_output=True,text=True)
+        self.assertIn('src=$HOME/redact.py,dst=/redact.py,readonly',launch)
+        command = launch.split('2>&1 | ', 1)[1].split(' >> ', 1)[0]
+        args = shlex.split(command)
+        self.assertEqual(args, ['python3', '-u', '/redact.py'])
+        args[-1] = str(ROOT/'scripts/redact.py')
+        fake = r'fixture/key&with\slashes'
+        result=subprocess.run(args, input=f"api_key='unknown-key'\nBearer unknown-bearer\n{fake}\n",
+                              env=dict(os.environ,INFER_UPSTREAM_KEY=fake),
+                              capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertNotIn('fixture-key',result.stdout)
+        for value in (fake, 'unknown-key', 'unknown-bearer'):
+            self.assertNotIn(value,result.stdout)
+        self.assertEqual(result.stdout.count('[REDACTED]'), 3)
+        self.assertNotIn('infer.key',doc)
+        self.assertIn('. ~/node.env',launch)

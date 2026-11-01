@@ -235,8 +235,8 @@ The [V4.1 cookbook's long-context section](https://docs.sglang.io/cookbook/autor
 emphasizes prefix reuse, KV offload and session affinity, with settings tied to
 specific hardware/topology/engine images. Its static examples of 16K/32K prefill
 and 0.70–0.85 memory fractions are AMD configurations, not a verified match for
-this eight-B300 409,600-context cell. The live SGLang run uses prefill **8192** and memory **0.85**; do not transplant AMD/offload flags. A long
-context cap does not reserve enough KV cache for 128 full-length prompts. Benchmark
+this eight-B300 409,600-context cell. The live SGLang run uses prefill **8192**
+and memory **0.85**; do not transplant AMD/offload flags. A long context cap does not reserve enough KV cache for 128 full-length prompts. Benchmark
 actual prompt lengths, cache reuse and memory before tuning or selling capacity.
 
 Keep KV dtype and kernel selection automatic: forcing FP8 KV would override this
@@ -319,9 +319,9 @@ same-region mirror at sustained 10–25 Gbit/s 20–50 min; HF at sustained 10�
 For push, the relay/staging host **upload** rate is the bottleneck: the base
 checkpoint alone is about 68–70 min at 1 Gbit/s or 6.8–7 min at 10 Gbit/s; NVFP4
 is about 57 min at 1 Gbit/s. A nearby relay or NVFP4 can materially shorten staging.
-These are budgets, not provider
-promises. The long-context profile admits fewer concurrent requests (128 for SGLang versus
-256); long prefills, cache pressure and compilation may change these allowances.
+These are planning budgets, not provider promises. The default SGLang profile
+admits 128 concurrent requests, compared with 256 in the optional throughput
+profile. Long prefills, cache pressure and compilation can affect these budgets.
 The 409,600 cap is not a measured speed or cold-start claim. Xet/CDN throughput
 can be lower. A full 510 GB hash pass alone takes
 about 1.7–8.5 min at 5–1 GB/s disk read throughput. Record real phase times before

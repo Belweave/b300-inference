@@ -3,14 +3,15 @@
 Default: the finalized max-TPS configuration run on 8× B300 with TP8.
 The commands below are operator instructions, not an automatic deployment.
 The server binds `0.0.0.0:8000` inside the container; the published host port is
-loopback-only for the tunnel. Provision a private, mode-600 `~/infer.key` first.
-The exact sed expression assumes the key contains no sed pattern/replacement
-metacharacters (including `/`, `&`, and backslash); use a compatible generated key.
+loopback-only for the tunnel. The sole key source is the private, mode-600
+`~/node.env`: its `INFER_UPSTREAM_KEY` must be the same upstream key configured
+in the gateway. Provision that value in `~/.config/b300/node.env` on the Mac
+before copying it below; do not generate a separate server key.
 SGLang has no env/file option for `--api-key`: Docker inspect and node process
-inspection (`ps`) can expose it. Sed plus `--log-driver none` protects logs only.
+inspection (`ps`) can expose it. The kit's Python redactor plus `--log-driver none` protects logs only.
 
 Both parsers use **auto** on `lmsysorg/sglang:dev-dsv41`. From architecture
-`DeepseekV4ForCausalLM`, the image resolved tool calls to `deepseekv41` and
+`DeepseekV41ForCausalLM`, the image resolved tool calls to `deepseekv41` and
 reasoning to `deepseek-v41`. We use `auto`, not hardcoded parser names.
 
 No served-name override was used on the live server: it serves `/models/dsv41`.
@@ -25,7 +26,7 @@ secret transport and served-name override are separate from this live recipe.
 
 ```bash
 # ON THE MAC, from the b300-inference repo; replace <user@node> and <port>.
-scp -P <port> -p ~/.config/b300/node.env <user@node>:~/
+scp -P <port> -p ~/.config/b300/node.env scripts/redact.py <user@node>:~/
 ssh -p <port> <user@node> 'chmod 600 ~/node.env'
 ```
 
@@ -51,20 +52,20 @@ PY
 set +x
 bash -e <<'BASH'
 umask 077
-INFER_KEY=$(cat ~/infer.key)
-: "${INFER_KEY:?missing from ~/infer.key}"
-export INFER_KEY
+set -a; . ~/node.env; set +a
+: "${INFER_UPSTREAM_KEY:?missing from node.env}"
 mkdir -p -m 700 ~/dsv41-logs
 chmod 700 ~/dsv41-logs
 touch ~/dsv41-logs/dsv41.log
 chmod 600 ~/dsv41-logs/dsv41.log
 # The key is visible in container configuration and process args; filtering protects logs only.
 docker run -d --name dsv41 --gpus all --ipc host --shm-size 32g \
-  --cap-add SYS_NICE --log-driver none -p 127.0.0.1:8000:8000 -e INFER_KEY \
+  --cap-add SYS_NICE --log-driver none -p 127.0.0.1:8000:8000 -e INFER_UPSTREAM_KEY \
   --mount type=bind,src=/mnt/nvme/models/dsv41,dst=/models/dsv41,readonly \
   --mount "type=bind,src=$HOME/dsv41-logs,dst=/logs" \
+  --mount "type=bind,src=$HOME/redact.py,dst=/redact.py,readonly" \
   --entrypoint sh lmsysorg/sglang:dev-dsv41 -c \
-  'umask 077; python3 -m sglang.launch_server --model-path /models/dsv41 --tp 8 --trust-remote-code --host 0.0.0.0 --port 8000 --context-length 409600 --max-running-requests 128 --cuda-graph-max-bs-decode 128 --chunked-prefill-size 8192 --mem-fraction-static 0.85 --tool-call-parser auto --reasoning-parser auto --enable-metrics --api-key "$INFER_KEY" 2>&1 | sed -u "s/$INFER_KEY/[REDACTED]/g" >> /logs/dsv41.log'
+  'umask 077; python3 -m sglang.launch_server --model-path /models/dsv41 --tp 8 --trust-remote-code --host 0.0.0.0 --port 8000 --context-length 409600 --max-running-requests 128 --cuda-graph-max-bs-decode 128 --chunked-prefill-size 8192 --mem-fraction-static 0.85 --tool-call-parser auto --reasoning-parser auto --enable-metrics --api-key "$INFER_UPSTREAM_KEY" 2>&1 | python3 -u /redact.py >> /logs/dsv41.log'
 BASH
 ```
 
@@ -81,12 +82,12 @@ until curl -fsS localhost:8000/health >/dev/null; do sleep 15; done; echo health
 ```bash
 # NODE: test after healthy; source the key without printing it.
 set +x
-INFER_KEY=$(cat ~/infer.key)
+set -a; . ~/node.env; set +a
 curl -fsS localhost:8000/health
 curl -fsS localhost:8000/v1/chat/completions \
   -H @- -H 'Content-Type: application/json' \
   -d '{"model":"/models/dsv41","messages":[{"role":"user","content":"Say hi in five words."}],"max_tokens":32}' \
-  <<<"Authorization: Bearer $INFER_KEY"
+  <<<"Authorization: Bearer $INFER_UPSTREAM_KEY"
 ```
 
 ```bash
