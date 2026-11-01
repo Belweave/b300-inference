@@ -60,6 +60,21 @@ class KitTests(unittest.TestCase):
             self.assertEqual(status['ok'],'error')
             self.assertEqual([x['phase'] for x in status['timings']],['pull','health'])
 
+    def test_status_public_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env=dict(os.environ,RUN_DIR=directory,RUN_ID='test',MODEL='m',MODEL_REVISION='r',ENGINE='sglang',ENDPOINT='http://127.0.0.1:8000')
+            for network,phase,expected in [
+                ('cloudflared','ready',None),
+                ('cloudflared','serving','https://api.infer.belweave.ai'),
+                ('cloudflared','draining',None),
+                ('ssh','serving',None),
+            ]:
+                with self.subTest(network=network,phase=phase):
+                    Path(directory,'network.json').write_text(json.dumps({'selected':network}))
+                    subprocess.run(['python3',str(ROOT/'scripts/status.py'),phase,'ok'],env=env,check=True)
+                    status=json.loads(Path(directory,'status.json').read_text())
+                    self.assertEqual(status['public_endpoint'],expected)
+
     def test_volume_reuse_requires_matching_checksum(self):
         import hashlib
         with tempfile.TemporaryDirectory() as directory:
