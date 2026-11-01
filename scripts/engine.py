@@ -3,9 +3,13 @@ import json
 import os
 import sys
 
-def launch_args(e, width=8, port=8000):
-    if port == 8000 and e.get('ENGINE_PORT', '8000') != '8000':
-        raise SystemExit('Engine port must be 8000 for the relay contract')
+def launch_args(e, width=8, port=None):
+    # The tunnel front door is 127.0.0.1:8000. With the SSE relay (default) that is the
+    # relay and the engine/router listens on ENGINE_PORT (8001); see scripts/sse_relay.py.
+    if port is None:
+        port = int(e.get('ENGINE_PORT', '8000'))
+    if not 1024 <= int(port) <= 65535:
+        raise SystemExit('Engine port must be 1024..65535')
     common = ['--host', '127.0.0.1', '--port', str(port), '--served-model-name', e['MODEL']]
     if e['ENGINE'] == 'sglang':
         args = ['python3', '-m', 'sglang.launch_server', '--model-path', '/weights',

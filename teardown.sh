@@ -16,7 +16,7 @@ for k,v in json.load(open(sys.argv[1])).items(): print(k+'='+str(v))
 PY
     )
 fi
-export ENGINE_PORT=$PORT ENDPOINT="http://127.0.0.1:$PORT"
+export ENDPOINT="http://127.0.0.1:$PORT"
 need flock
 exec 9>"$KIT_ROOT/runs/node.lock"
 flock -w 30 9 || { echo 'Lifecycle lock busy; retry teardown' >&2; exit 1; }
@@ -63,6 +63,12 @@ stop_service() {
 stop_service "$GATEWAY_NAME"
 stop_service "$SERVER_NAME"
 stop_connector
+if [[ -f $RUN_DIR/relay.pid ]]; then
+    relay_pid=$(cat "$RUN_DIR/relay.pid")
+    if [[ $relay_pid =~ ^[0-9]+$ && -r /proc/$relay_pid/cmdline ]] && tr '\0' ' ' < "/proc/$relay_pid/cmdline" | grep -Fq "$KIT_ROOT/scripts/sse_relay.py"; then
+        kill "$relay_pid" 2>/dev/null || true
+    fi
+fi
 if [[ -f $RUN_DIR/cloudflared.pid ]]; then
     python3 "$KIT_ROOT/scripts/tunnel_log.py" collect /tmp/cloudflared.log \
         "$RUN_DIR/cloudflared-log-cursor.json" "$RUN_DIR/cloudflared.log"

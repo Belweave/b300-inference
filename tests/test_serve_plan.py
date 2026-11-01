@@ -41,7 +41,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(p['variant'], dict(layout='tp8', engram='gpu', dspark='off'))
         self.assertEqual(len(p['processes']), 1)
         worker = p['processes'][0]
-        self.assertEqual(worker['port'], 8000)
+        self.assertEqual(worker['port'], 8001)  # behind the SSE relay on :8000
         self.assertEqual(worker['env']['CUDA_VISIBLE_DEVICES'], '0,1,2,3,4,5,6,7')
         self.assertNotIn('--attn-dp-size', worker['argv_without_key'])
         self.assertEqual(flag(worker['argv_without_key'], '--tp-size'), '8')
@@ -63,7 +63,8 @@ class PlanTests(unittest.TestCase):
                     self.assertEqual(worker['port'], 8100+i*100)
                     devices.extend(worker['env']['CUDA_VISIBLE_DEVICES'].split(','))
                 self.assertEqual(devices, list(map(str, range(8))))
-                self.assertEqual(router['port'],8000)
+                self.assertEqual(router['port'],8001)
+                self.assertEqual(flag(router['argv_without_key'],'--port'),'8001')
                 self.assertEqual(flag(router['argv_without_key'],'--policy'),'cache_aware')
                 self.assertIn('--dp-aware',router['argv_without_key'])
                 for worker in workers:
@@ -273,7 +274,11 @@ class LifecycleTests(unittest.TestCase):
             with patch('warm.check') as check:
                 obj.health()
             self.assertEqual([c.args[0] for c in check.call_args_list],
-                             ['http://127.0.0.1:8100','http://127.0.0.1:8200','http://127.0.0.1:8000'])
+                             ['http://127.0.0.1:8100','http://127.0.0.1:8200','http://127.0.0.1:8001'])
+            obj.relay=Mock()
+            with patch('warm.check') as check:
+                obj.health()
+            self.assertEqual(check.call_args_list[-1].args[0],'http://127.0.0.1:8000')
 
     def test_launch_validates_parsed_engram_dict_and_delivers_plan_over_stdin(self):
         with tempfile.TemporaryDirectory() as folder, patch('warm.ROOT',Path(folder)):

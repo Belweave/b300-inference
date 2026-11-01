@@ -11,6 +11,21 @@ LAYOUTS = {'tp8': (8, 1), 'dep4x2': (4, 2), 'dep8x1': (8, 1), 'dep2x4': (2, 4)}
 DEFAULT_IMAGE = 'lmsysorg/sglang:dev-dsv41'
 
 
+RELAY_PORT = 8000  # tunnel ingress and every local client; fixed contract
+
+
+def front_port(env):
+    """Port of the engine (tp8) or router (DP layouts) behind the SSE relay on :8000."""
+    if env.get('SSE_RELAY', '1') == '0':
+        return RELAY_PORT
+    if env.get('SSE_RELAY', '1') != '1':
+        raise ValueError('SSE_RELAY must be 1 or 0')
+    port = int(env.get('ENGINE_PORT') or 8001)
+    if port == RELAY_PORT or not 1024 <= port <= 65535 or 8100 <= port <= 8499 or 29500 <= port <= 29899:
+        raise ValueError('ENGINE_PORT must be a free loopback port other than 8000 and the worker/dist ports')
+    return port
+
+
 def variant(env):
     layout = env.get('LAYOUT', 'dep8x1' if env.get('ATTN_MODE') == 'dp_ep' else 'tp8')
     engram = env.get('ENGRAM', 'gpu')
@@ -57,17 +72,18 @@ def require_host_ram(selected, gate):
 def build_plan(selected, image, name, weights, kit):
     v = variant(selected)
     width, replicas = LAYOUTS[v['layout']]
+    front = int(selected.get('ENGINE_PORT', RELAY_PORT))
     processes = []
     for i in range(replicas):
-        port = 8000 if v['layout'] == 'tp8' else 8100+i*100
+        port = front if v['layout'] == 'tp8' else 8100+i*100
         devices = ','.join(str(n) for n in range(i*width, (i+1)*width))
         args = launch_args(selected, width, port)
         if v['layout'] != 'tp8': args += ['--dist-init-addr', f'127.0.0.1:{29500+i*100}']
         processes.append({'role': 'engine', 'port': port, 'env': {'CUDA_VISIBLE_DEVICES': devices},
                           'argv_without_key': args})
     if v['layout'] != 'tp8':
-        processes.append({'role': 'router', 'port': 8000, 'env': {}, 'argv_without_key': [
-            'python3', '-m', 'sglang_router.launch_router', '--host', '127.0.0.1', '--port', '8000',
+        processes.append({'role': 'router', 'port': front, 'env': {}, 'argv_without_key': [
+            'python3', '-m', 'sglang_router.launch_router', '--host', '127.0.0.1', '--port', str(front),
             '--worker-urls', *[f"http://127.0.0.1:{p['port']}" for p in processes],
             '--policy', 'cache_aware', '--dp-aware', '--prometheus-host', '127.0.0.1']})
     create = ['docker', 'create', '-i', '--name', name, '--gpus', 'all', '--network', 'host',

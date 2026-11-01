@@ -39,9 +39,10 @@ Key knobs: `BAKED_IMAGE`, `BASE_WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41`),
 `WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41-uncensored`), `SHARD_WORKERS=16`,
 `HASH_WORKERS=4`, `MIN_MBPS=0` (decimal MB/s; measured over at least 10 seconds),
 `MEM_FRACTION=.85`, `CHUNKED_PREFILL_SIZE=8192`, `SCHEDULE_POLICY=lpm`,
-`CONTEXT_LENGTH=262144` (250000–400000), `MAX_RUNNING_REQUESTS=64` (provisional;
-replace from the noon pool report and sweep),
-`LAYOUT=tp8|dep4x2|dep8x1|dep2x4`, `ENGRAM=gpu|host`, `DSPARK=off|on`, `WARM_GRAPH_BS=1,2,4,8,16,32,64`,
+`CONTEXT_LENGTH=262144` (250000–400000), `MAX_RUNNING_REQUESTS=128` (fit-checked at
+launch, falls back to 64; see README "128 streams and the fit check"),
+`LAYOUT=tp8|dep4x2|dep8x1|dep2x4`, `ENGRAM=gpu|host`, `DSPARK=off|on`, `WARM_GRAPH_BS=1,2,4,8,16,32,64,96,128` (cut to 64 on fallback), `FIT_TOKENS_PER_STREAM=32768`,
+`SSE_RELAY=1` with `ENGINE_PORT=8001` (relay on :8000),
 `HIERARCHICAL_CACHE=0`, `ENGRAM_TABLE_GB=203`, `ENGRAM_HEADROOM_GB=32`.
 MTP is deliberately rejected; see [flag evidence and dropped options](sglang-warm-flags.md).
 Baseline is TP8/EP8. The parsers are `deepseek-v41` for reasoning and `deepseekv41`

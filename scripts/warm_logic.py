@@ -65,10 +65,15 @@ def drain_until(window_end, now, cap=20*60):
 
 def parse_pool(text):
     tokens = re.findall(r'max_total_num_tokens\s*[=:]\s*([\d,]+)', text)
+    # The scheduler's capacity line carries the effective running limit. ServerArgs dumps
+    # repeat the *requested* value, so only lines that also report the pool count.
+    running = [int(m) for line in text.splitlines() if 'max_total_num_tokens' in line
+               for m in re.findall(r'max_running_requests\s*[=:]\s*(\d+)', line)]
     bpt = re.findall(r'(?:KV\s+bytes[/_ ]per[_ ]token|KV\s+bytes/token|kv_bytes_per_token)\s*[=:]\s*([\d.]+)', text, re.I)
     # Several DP ranks may log their own pool. Never sum them without a topology proof.
     return {'max_total_num_tokens': min(int(x.replace(',', '')) for x in tokens) if tokens else None,
             'kv_bytes_per_token': max(map(float, bpt)) if bpt else None,
+            'engine_max_running_requests': min(running) if running else None,
             'scope': 'minimum logged pool; conservative, not a verified aggregate across DP ranks'}
 
 
@@ -88,3 +93,65 @@ def recommend_running(pool, context):
     return {'context_tokens': context, 'usable_pool_tokens': usable,
             'max_running_requests': usable//context if usable is not None else None,
             'basis': 'floor(0.9 * max_total_num_tokens / context_tokens); conservative pool bound, validate with sweep'}
+
+
+# ---- 128-vs-64 concurrency decision (the only place it is made) ------------------
+# Orchestrators: warm.py Warm.launch_with_fit_fallback and bootstrap.sh
+# launch_with_fit_fallback (via scripts/fit.py). Both call only these two functions.
+GRAPH_SIZES = (1, 2, 4, 8, 16, 32, 64, 96, 128)
+FALLBACK_RUNNING = 64
+FIT_HEADROOM = 0.9
+
+
+def graph_sizes(maximum, explicit=None):
+    """CUDA graph decode batch sizes: explicit list, else the standard ladder up to maximum."""
+    graph = [int(x) for x in explicit.split(',')] if explicit else [n for n in GRAPH_SIZES if n <= maximum]
+    if not graph or sorted(set(graph)) != graph or graph[0] < 1 or graph[-1] > maximum:
+        raise ValueError('Graph sizes must be increasing, unique and within max running')
+    return graph
+
+
+def concurrency_fit(pool, requested, context, tokens_per_stream, started=True):
+    """Did the engine start with `requested` running requests and report a KV pool that fits?
+
+    "Fit" means all of: the engine reached health with this setting (no OOM in KV
+    allocation or CUDA-graph capture); it logged max_total_num_tokens; it did not clamp
+    max_running_requests below the request; and 90% of the pool holds `requested`
+    streams of `tokens_per_stream` resident tokens each. It does NOT mean `requested`
+    full-context (262144-token) streams are resident at once; full_context_streams
+    records how many of those the pool holds.
+    """
+    if requested < 1 or context < 1 or tokens_per_stream < 1:
+        raise ValueError('Fit inputs must be positive')
+    capacity = pool.get('max_total_num_tokens')
+    usable = math.floor(capacity*FIT_HEADROOM) if capacity is not None else None
+    engine_running = pool.get('engine_max_running_requests')
+    reasons = []
+    if not started:
+        reasons.append(f'engine did not reach health with max_running_requests={requested}')
+    elif capacity is None:
+        reasons.append('engine log reported no KV pool size (max_total_num_tokens)')
+    else:
+        if usable < requested*tokens_per_stream:
+            reasons.append(f'KV pool {capacity} tokens (90% = {usable}) < {requested} x {tokens_per_stream} tokens')
+        if engine_running is not None and engine_running < requested:
+            reasons.append(f'engine clamped max_running_requests to {engine_running}')
+    return {'requested': requested, 'passed': not reasons, 'reason': '; '.join(reasons) or None,
+            'max_total_num_tokens': capacity, 'usable_pool_tokens': usable,
+            'engine_max_running_requests': engine_running, 'tokens_per_stream': tokens_per_stream,
+            'required_tokens': requested*tokens_per_stream, 'context_tokens': context,
+            'full_context_streams': usable//context if usable is not None else None,
+            'definition': 'engine healthy at requested; pool logged; not clamped; '
+                          '0.9*max_total_num_tokens >= requested*FIT_TOKENS_PER_STREAM'}
+
+
+def fallback_settings(selected, fallback=FALLBACK_RUNNING):
+    """Engine settings for the fallback launch: running limit and graph ladder back to 64."""
+    current = int(selected['MAX_RUNNING_REQUESTS'])
+    if current <= fallback:
+        return None
+    result = dict(selected, MAX_RUNNING_REQUESTS=str(fallback), CUDA_GRAPH_MAX_BS=str(fallback))
+    if selected.get('WARM_GRAPH_BS'):
+        result['WARM_GRAPH_BS'] = ','.join(str(n) for n in graph_sizes(current, selected['WARM_GRAPH_BS'])
+                                           if n <= fallback)
+    return result

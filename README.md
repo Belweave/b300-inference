@@ -240,20 +240,19 @@ in this research. NVIDIA's model-specific NIM guide instead uses its **SGLang**
 experimental image `nvcr.io/nim/nvidia/sglang-model-free-nim-experimental:2.1.6-variant-deepseek-v4.1-flash-1017`
 with a matching recipe; that is not evidence that TensorRT-LLM itself supports it.
 
-The uncensored SGLang preset starts at TP8/EP8, 262,144 tokens and 64 running
-requests. Use the noon KV-pool report and concurrency sweep to choose capacity
-and memory fraction. The vLLM preset remains a separate experiment. The previous
-base-model run is recorded in [the live launch](docs/live-node.md)
-and [model naming, gateway mapping and public listing hold](docs/model-naming.md).
+The uncensored SGLang preset starts at TP8/EP8, 262,144 tokens and **128** running
+requests (CUDA graphs `1,2,4,8,16,32,64,96,128`), with an automatic fall back to 64
+(graphs up to 64) when the launch-time fit check fails; see
+[128 streams and the fit check](#128-streams-and-the-fit-check). The vLLM preset stays at 64.
 
 | Setting | SGLang | vLLM |
 |---|---|---|
 | Parallelism | `--tp-size 8 --ep-size 8` | `--tensor-parallel-size 8` |
-| Capacity | `--max-running-requests 64` (starting knob) | `--max-num-seqs 64` |
+| Capacity | `--max-running-requests 128`, fit-checked, falls back to 64 | `--max-num-seqs 64` |
 | Prefill | `--chunked-prefill-size 8192` | `--enable-chunked-prefill --max-num-batched-tokens 4096` |
-| Graph ceiling | `--cuda-graph-max-bs-decode 64` | `--compilation-config '{"max_cudagraph_capture_size":64}'` |
+| Graph ceiling | `--cuda-graph-max-bs-decode 128` (64 after fallback) | `--compilation-config '{"max_cudagraph_capture_size":64}'` |
 | Memory/context | `--mem-fraction-static 0.85 --context-length 262144` | `--gpu-memory-utilization 0.80 --max-model-len 409600` |
-| Auth/network | loopback :8000; inner argv fallback | loopback :8000; `VLLM_API_KEY` env |
+| Auth/network | relay :8000 -> engine :8001; inner argv fallback | relay :8000 -> engine :8001; `VLLM_API_KEY` env |
 | Native chat | `--reasoning-parser deepseek-v41 --tool-call-parser deepseekv41 --trust-remote-code` | `--tokenizer-mode deepseek_v41 --reasoning-parser deepseek_v41 --tool-call-parser deepseek_v41 --enable-auto-tool-choice` |
 
 `PROFILE=longctx` is the default; both engine containers add `--cap-add SYS_NICE`.
@@ -287,6 +286,50 @@ now queues behind a **64-request** starting SGLang engine cap. A 1M architectura
 not mean simultaneous full-length prompts fit. The SGLang default per-request cap is
 262,144 tokens (warm-up accepts 250,000–400,000), with prompt plus output
 constrained by engine memory. vLLM retains its separate 409,600-token preset.
+
+## 128 streams and the fit check
+
+`MAX_RUNNING_REQUESTS=128` is staged for both launch paths (`scripts/warm.sh` and
+`bootstrap.sh`). Whether 128 fits can only be known at launch, from the engine itself:
+
+* **Decision** (one place): `scripts/warm_logic.py` `concurrency_fit()`; fallback
+  settings: `fallback_settings()` (64 running, graph ladder cut to `1,2,4,8,16,32,64`).
+* **Action**: `scripts/warm.py` `Warm.launch_with_fit_fallback()`; in the standalone kit,
+  `bootstrap.sh` `launch_with_fit_fallback` via `scripts/fit.py`. Both relaunch at most once.
+
+"Fit" means all of: the engine reaches health with 128 (no OOM in KV allocation or
+CUDA-graph capture); its log reports `max_total_num_tokens`; its scheduler line does not
+clamp `max_running_requests` below 128; and 90% of the pool holds 128 x
+`FIT_TOKENS_PER_STREAM` (default 32,768) resident tokens. It does **not** mean 128
+full 262,144-token streams are resident at once; that needs ~33.5M pool tokens and
+should not be assumed. The report records `full_context_streams` =
+floor(0.9 x pool / 262,144) so the real full-context headroom is visible; with fewer
+resident tokens, SGLang queues or retracts requests rather than failing them.
+Set `FIT_TOKENS_PER_STREAM=262144` for a strict full-residency bar.
+
+On fallback, warm-up prints `FIT FALLBACK: ... Flag Kai before traffic.` to stdout and
+stderr, keeps the 128 log as `engine-128.log`, and `ready.json` carries
+`max_running_requests_requested`, `max_running_requests_effective`, `fit_passed`,
+`fallback_reason`, `kv_pool_tokens`, `full_context_streams`, `cuda_graph_max_bs`,
+`warm_graph_bs` and `sse_relay` (additive; schema stays 1). The kit writes the same
+facts to `runs/<id>/fit.json` (also in `status.json` as `fit`). For DP layouts the
+limit and pool are per engine; the minimum logged pool is used.
+
+## SSE heartbeat relay
+
+Cloudflare returns 524 when the origin is silent for 100 s, and a queued request or a
+long prefill can be. `scripts/sse_relay.py` (aiohttp, already a node dependency) owns
+`127.0.0.1:8000`, the unchanged tunnel ingress, and forwards to the engine (or DP router)
+on `ENGINE_PORT` (8001). For JSON requests with `"stream": true` it sends 200
+`text/event-stream` headers itself if the engine has not answered in 15 s, then
+`: keepalive` comments every 15 s of silence, only between events. Engine bytes pass
+through unbuffered, there is no total-duration timeout, and a client disconnect closes
+the engine connection (the engine aborts the request). An engine error after headers
+were synthesized becomes one `data: {"error": ...}` event. Everything else passes
+through unchanged, and an engine that is down gives 502 (the gateway's no-node path).
+**Non-streaming requests with more than 100 s to first byte can still 524; use
+`stream=true` for long prompts or generations.** `SSE_RELAY=0` restores the engine on
+:8000. The relay sees no keys except per-request Authorization, which it passes on.
 
 ## Weight delivery and window budget
 
@@ -467,7 +510,9 @@ The kit never sources `.env.example`; an empty name is not a secret-file templat
 | `TARGET_TTFT_MS`, `TARGET_TPOT_MS` | 2000, 50; illustrative targets, not promised SLA |
 | `CONCURRENCY` | 16,32,64,128,256,512,1024 |
 | `OUTPUT_TOKENS`, `PROMPT_REPEATS`, `REQUESTS_PER_STREAM`, `REQUEST_TIMEOUT_SECONDS` | 256, 64, 2, 180; synthetic workload controls |
-| `MAX_RUNNING_REQUESTS`, `CHUNKED_PREFILL_SIZE`, `CUDA_GRAPH_MAX_BS` | SGLang: 64, 8192, 64; vLLM: 64, 4096, 64 |
+| `MAX_RUNNING_REQUESTS`, `CHUNKED_PREFILL_SIZE`, `CUDA_GRAPH_MAX_BS` | SGLang: 128, 8192, 128; vLLM: 64, 4096, 64 |
+| `FIT_TOKENS_PER_STREAM`, `FALLBACK_MAX_RUNNING_REQUESTS` | 32768, 64; fit check bar and fallback limit |
+| `SSE_RELAY`, `ENGINE_PORT`, `SSE_HEARTBEAT_SECONDS` | 1, 8001, 15; relay on :8000 in front of the engine (`SSE_RELAY=0`: engine on :8000) |
 | `MEM_FRACTION`, `CONTEXT_LENGTH`, `PARALLELISM`, `SPECULATION` | SGLang .85/262144 (vLLM .80/409600), tp / dp_ep, none / dspark |
 | `ENGINE_EXTRA_ARGS_JSON` | JSON argv string array, no shell evaluation; do not include secrets |
 | `MIN_FREE_GB`, `HEALTH_TIMEOUT_SECONDS` | 650 budget minus existing shards; 2400 seconds, also bounded by window |

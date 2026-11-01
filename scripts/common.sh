@@ -18,7 +18,9 @@ export RUN_DIR="$KIT_ROOT/runs/$RUN_ID"
 export WEIGHTS_DIR=${WEIGHTS_DIR:-/data/weights/${MODEL##*/}}
 export WEIGHTS_SOURCE=${WEIGHTS_SOURCE:-hf}
 export PORT=${PORT:-8000}
-export ENGINE_PORT=$PORT
+# SSE heartbeat relay (scripts/sse_relay.py) owns PORT; the engine listens on ENGINE_PORT.
+export SSE_RELAY=${SSE_RELAY:-1}
+if [[ $SSE_RELAY == 1 ]]; then export ENGINE_PORT=${ENGINE_PORT:-8001}; else export ENGINE_PORT=$PORT; fi
 if [[ -z ${INFER_UPSTREAM_KEY:-} && -n ${ORIGIN_KEY:-} ]]; then
     export INFER_UPSTREAM_KEY=$ORIGIN_KEY
     if [[ ${ORIGIN_ALIAS_WARNED:-0} != 1 ]]; then
@@ -34,7 +36,7 @@ export SSH_DIRECTION=${SSH_DIRECTION:-forward}
 export IMAGE_SOURCE=${IMAGE_SOURCE:-$([[ $WEIGHTS_SOURCE == push ]] && echo push || echo pull)}
 export PUSH_DIR=${PUSH_DIR:-$RUN_DIR/incoming}
 export STAGING_DIR=${STAGING_DIR:-$KIT_ROOT/staging}
-export ENDPOINT="http://127.0.0.1:$ENGINE_PORT"
+export ENDPOINT="http://127.0.0.1:$PORT"
 export SERVER_NAME="b300-$RUN_ID-engine"
 export GATEWAY_NAME="b300-$RUN_ID-gateway"
 export DRY_RUN=${DRY_RUN:-0}

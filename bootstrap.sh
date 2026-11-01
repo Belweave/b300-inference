@@ -40,8 +40,10 @@ DRY RUN: no probes, downloads, Docker, SSH, or tunnels executed.
 3. WEIGHTS_SOURCE=$WEIGHTS_SOURCE; IMAGE_SOURCE=$IMAGE_SOURCE.
    push: verify staged files against docs/model-metadata.json; SHA256 image archive,
    zstd -dc | docker load; verify loaded image ID. No node-side data downloads.
-4. Launch $ENGINE ($ENGINE_IMAGE), TP8, loopback 127.0.0.1:8000, PROFILE=$PROFILE.
+4. SSE_RELAY=$SSE_RELAY: heartbeat relay on 127.0.0.1:$PORT -> engine 127.0.0.1:$ENGINE_PORT.
+   Launch $ENGINE ($ENGINE_IMAGE), TP8, PROFILE=$PROFILE.
    Context $CONTEXT_LENGTH; max running $MAX_RUNNING_REQUESTS; graph max $CUDA_GRAPH_MAX_BS; SYS_NICE.
+   Fit check (warm_logic.concurrency_fit); on failure relaunch once at ${FALLBACK_MAX_RUNNING_REQUESTS:-64}.
 5. GET /health without auth; /v1/models with auth (+401 without); real chat smoke.
 6. cloudflared: call unchanged Netops helper after readiness; CF_TUNNEL_TOKEN env.
    ssh/forward: report ready; watcher calls relay.sh up WINDOW USER@HOST --port N --key FILE --expires EPOCH.
@@ -174,24 +176,61 @@ p.joinpath('runtime.json').write_text(json.dumps({'image':os.environ['ENGINE_IMA
  'digests':json.loads(p.joinpath('image-digests.json').read_text()),
  'argv_without_key':subprocess.check_output(['python3',os.environ['KIT_ROOT']+'/scripts/engine.py']).decode().strip('\0').split('\0')}))
 PYMETA
-phase launch
-[[ ! -e $RUN_DIR/stop ]] || die 'Deadline reached'
-if ! docker inspect "$SERVER_NAME" >/dev/null 2>&1; then
-    docker create -i --name "$SERVER_NAME" --label "b300.run=$RUN_ID" --gpus all --network host --ipc host --cap-add SYS_NICE \
-        --log-driver none --mount "type=bind,src=$WEIGHTS_DIR,dst=/weights,readonly" \
-        --mount "type=bind,src=$KIT_ROOT,dst=/kit,readonly" --entrypoint python3 "$ENGINE_IMAGE" /kit/scripts/serve.py >/dev/null
+phase relay
+if [[ $SSE_RELAY == 1 ]]; then
+    # Tunnel ingress stays http://127.0.0.1:8000; the relay owns it and the engine moves to ENGINE_PORT.
+    [[ $ENGINE_PORT != "$PORT" ]] || die 'SSE_RELAY=1 requires ENGINE_PORT different from PORT'
+    env -i PATH="$PATH" HOME="$HOME" python3 -c 'import aiohttp' 2>/dev/null || die 'SSE relay needs aiohttp on the host (requirements-node.txt)'
+    if [[ ! -f $RUN_DIR/relay.pid ]] || ! kill -0 "$(cat "$RUN_DIR/relay.pid")" 2>/dev/null; then
+        # Minimal environment: the relay never sees keys; Authorization passes through per request.
+        nohup env -i PATH="$PATH" HOME="$HOME" PORT="$PORT" ENGINE_PORT="$ENGINE_PORT" SSE_HEARTBEAT_SECONDS="${SSE_HEARTBEAT_SECONDS:-15}" \
+            python3 "$KIT_ROOT/scripts/sse_relay.py" </dev/null >> "$RUN_DIR/relay.log" 2>&1 9>&- &
+        echo "$!" > "$RUN_DIR/relay.pid"
+        sleep 2
+        kill -0 "$(cat "$RUN_DIR/relay.pid")" || die 'SSE relay exited; inspect relay.log'
+    fi
 fi
-if [[ $(docker inspect -f '{{.State.Running}}' "$SERVER_NAME") != true ]]; then
-    ( python3 "$KIT_ROOT/scripts/payload.py" engine | docker start -ai "$SERVER_NAME" 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" >> "$RUN_DIR/engine.log" ) 9>&- &
-fi
-phase health
-health_end=$(($(date +%s) + ${HEALTH_TIMEOUT_SECONDS:-2400}))
-while ! python3 "$KIT_ROOT/scripts/origin_request.py" /health 2>/dev/null >/dev/null; do
-    (( $(date +%s) < health_end && $(date +%s) < WINDOW_END-600 )) || die 'Health deadline exceeded'
-    container_state=$(docker inspect -f '{{.State.Status}}' "$SERVER_NAME")
-    [[ $container_state != exited && $container_state != dead ]] || die 'Engine exited; inspect engine.log'
-    sleep 5
-done
+launch_engine() {
+    [[ ! -e $RUN_DIR/stop ]] || die 'Deadline reached'
+    if ! docker inspect "$SERVER_NAME" >/dev/null 2>&1; then
+        docker create -i --name "$SERVER_NAME" --label "b300.run=$RUN_ID" --gpus all --network host --ipc host --cap-add SYS_NICE \
+            --log-driver none --mount "type=bind,src=$WEIGHTS_DIR,dst=/weights,readonly" \
+            --mount "type=bind,src=$KIT_ROOT,dst=/kit,readonly" --entrypoint python3 "$ENGINE_IMAGE" /kit/scripts/serve.py >/dev/null
+    fi
+    if [[ $(docker inspect -f '{{.State.Running}}' "$SERVER_NAME") != true ]]; then
+        ( python3 "$KIT_ROOT/scripts/payload.py" engine | docker start -ai "$SERVER_NAME" 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" >> "$RUN_DIR/engine.log" ) 9>&- &
+    fi
+}
+# Returns 1 when the engine container exited before health (e.g. KV or CUDA-graph OOM).
+wait_health() {
+    local health_end container_state
+    health_end=$(($(date +%s) + ${HEALTH_TIMEOUT_SECONDS:-2400}))
+    while ! python3 "$KIT_ROOT/scripts/origin_request.py" /health 2>/dev/null >/dev/null; do
+        (( $(date +%s) < health_end && $(date +%s) < WINDOW_END-600 )) || die 'Health deadline exceeded'
+        container_state=$(docker inspect -f '{{.State.Status}}' "$SERVER_NAME")
+        [[ $container_state != exited && $container_state != dead ]] || return 1
+        sleep 5
+    done
+}
+# Act on scripts/fit.py (decision: warm_logic.concurrency_fit). One relaunch at 64 at most.
+launch_with_fit_fallback() {
+    local started=1 fallback
+    phase launch
+    launch_engine
+    phase health
+    wait_health || started=0
+    fallback=$(python3 "$KIT_ROOT/scripts/fit.py" "$RUN_DIR/engine.log" "$started" "$RUN_DIR/fit.json")
+    [[ -n $fallback ]] || { (( started )) || die 'Engine exited; inspect engine.log'; return 0; }
+    log "FIT FALLBACK: MAX_RUNNING_REQUESTS $MAX_RUNNING_REQUESTS -> $fallback; reason in $RUN_DIR/fit.json. Flag Kai before traffic."
+    docker rm -f "$SERVER_NAME" >/dev/null
+    mv "$RUN_DIR/engine.log" "$RUN_DIR/engine-$MAX_RUNNING_REQUESTS.log" 2>/dev/null || true
+    export MAX_RUNNING_REQUESTS=$fallback CUDA_GRAPH_MAX_BS=$fallback
+    phase fallback_launch
+    launch_engine
+    wait_health || die 'Engine exited at fallback concurrency; inspect engine.log'
+    python3 "$KIT_ROOT/scripts/fit.py" "$RUN_DIR/engine.log" 1 "$RUN_DIR/fit.json" --after-fallback >/dev/null
+}
+launch_with_fit_fallback
 python3 "$KIT_ROOT/scripts/readiness.py"
 python3 "$KIT_ROOT/scripts/smoke.py"
 phase gateway

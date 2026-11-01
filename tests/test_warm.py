@@ -115,7 +115,7 @@ class WarmLogicTests(unittest.TestCase):
         self.assertNotIn('--chat-template',args)
         for flag,value in (('--tp-size','8'),('--ep-size','8'),('--reasoning-parser','deepseek-v41'),('--tool-call-parser','deepseekv41')):
             self.assertEqual(args[args.index(flag)+1],value)
-        with self.assertRaises(ValueError):settings(data,{'WARM_GRAPH_BS':'1,128'},logic.ram_gate(0))
+        with self.assertRaises(ValueError):settings(data,{'WARM_GRAPH_BS':'1,256'},logic.ram_gate(0))
         for context in ('249999','400001'):
             with self.assertRaises(ValueError):settings(data,{'CONTEXT_LENGTH':context},logic.ram_gate(0))
         high=settings(data,{'ATTN_MODE':'dp_ep','ENGRAM':'host'},logic.ram_gate(300_000_000_000))

@@ -1,7 +1,7 @@
 # Health and API authentication
 
 Inspected 2026-10-31. These are source findings, not a completed GPU deployment.
-Both automated kit engine presets explicitly bind `127.0.0.1:8000`; health is on that main port.
+Both automated kit presets serve `127.0.0.1:8000`: the SSE heartbeat relay (`scripts/sse_relay.py`) owns it and forwards to the engine on `ENGINE_PORT` (8001); health passes through unchanged. `SSE_RELAY=0` binds the engine on 8000 directly.
 
 | Engine | GET /health with --api-key | GET /v1/models |
 |---|---|---|

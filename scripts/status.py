@@ -22,7 +22,7 @@ if state.get('ok') == 'running':
 state.update(phase=phase, ok=result, phase_started_epoch=now,
              updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
              elapsed_seconds=now-state['started_epoch'])
-for name in ('gpu.json', 'runtime.json', 'network.json'):
+for name in ('gpu.json', 'runtime.json', 'network.json', 'fit.json'):
     p = path.parent / name
     if p.exists():
         state[name[:-5]] = json.loads(p.read_text())

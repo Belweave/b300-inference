@@ -16,8 +16,9 @@ import urllib.request
 import uuid
 
 from warm_download import load_manifest, acquire
-from warm_logic import deadline, jit_start, tunnel_slot
-from serve_plan import (variant, image_reference, host_gate, require_host_ram, build_plan,
+from warm_logic import (deadline, jit_start, tunnel_slot, graph_sizes, parse_pool,
+                        concurrency_fit, fallback_settings, FALLBACK_RUNNING)
+from serve_plan import (front_port, RELAY_PORT, variant, image_reference, host_gate, require_host_ram, build_plan,
                         add_arguments, argument_env, print_plan)
 from mirror_auth import parse_mirror_auth
 from warm_network import probe, public_url
@@ -25,6 +26,10 @@ from readiness import check
 from redact import redact, secret_values
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class EngineStopped(RuntimeError):
+    """The engine container exited before health (e.g. KV/CUDA-graph OOM)."""
 
 
 def settings(data, env, ram):
@@ -35,17 +40,17 @@ def settings(data, env, ram):
     require_host_ram({**env, 'ENGRAM': v['engram']}, ram)
     if env.get('ENGINE_EXTRA_ARGS_JSON', '[]') != '[]':
         raise ValueError('A/B warm plans require named selectors, not ENGINE_EXTRA_ARGS_JSON')
-    maximum = int(env.get('MAX_RUNNING_REQUESTS','64'))
+    # 128 is staged for the Nov 1 window; Warm.launch_with_fit_fallback drops to 64
+    # when the engine's KV pool report does not fit (warm_logic.concurrency_fit).
+    maximum = int(env.get('MAX_RUNNING_REQUESTS','128'))
     if maximum < 1: raise ValueError('MAX_RUNNING_REQUESTS must be positive')
-    graph = ([int(x) for x in env['WARM_GRAPH_BS'].split(',')] if env.get('WARM_GRAPH_BS')
-             else [n for n in (1,2,4,8,16,32,64) if n <= maximum])
-    if not graph or sorted(set(graph)) != graph or graph[0] < 1 or graph[-1] > maximum:
-        raise ValueError('Graph sizes must be increasing, unique and within max running')
+    graph = graph_sizes(maximum, env.get('WARM_GRAPH_BS'))
     context = int(env.get('CONTEXT_LENGTH','262144'))
     if not 250_000 <= context <= 400_000:
         raise ValueError('Warm CONTEXT_LENGTH must be 250000..400000 tokens')
     return dict(ENGINE='sglang', MODEL=data['model']['repo'], MODEL_REVISION=data['model']['revision'],
-                ENGINE_PORT='8000', CONTEXT_LENGTH=str(context),
+                ENGINE_PORT=str(front_port(env)), SSE_RELAY=env.get('SSE_RELAY','1'),
+                CONTEXT_LENGTH=str(context),
                 MEM_FRACTION=env.get('MEM_FRACTION','0.85'), MAX_RUNNING_REQUESTS=str(maximum),
                 CHUNKED_PREFILL_SIZE=env.get('CHUNKED_PREFILL_SIZE','8192'), CUDA_GRAPH_MAX_BS=str(graph[-1]),
                 PARALLELISM='tp' if v['layout'] == 'tp8' else 'dp_ep',
@@ -76,6 +81,7 @@ class Warm:
         self.lock = threading.RLock()
         self.name = 'b300-warm-'+self.id.lower()
         self.created = False
+        self.relay = None
         self.secrets = secret_values(env)
 
     def save(self):
@@ -139,7 +145,7 @@ class Warm:
         payload={'model':self.data['model']['repo'],'messages':messages,'max_tokens':tokens,
                  'stream':stream,'temperature':0}
         if stream: payload['stream_options']={'include_usage':True}
-        request=urllib.request.Request('http://127.0.0.1:8000/v1/chat/completions',
+        request=urllib.request.Request(f'http://127.0.0.1:{RELAY_PORT}/v1/chat/completions',
             data=json.dumps(payload).encode(), headers={'Content-Type':'application/json',
             'Authorization':'Bearer '+self.env['INFER_UPSTREAM_KEY']})
         with urllib.request.urlopen(request,timeout=min(120,self.remaining())) as response:
@@ -159,6 +165,33 @@ class Warm:
                         delta=choice.get('delta',{})
                         content |= any(bool(delta.get(k)) for k in ('content','reasoning','reasoning_content'))
                 if not (done and content): raise ValueError('Stream missing content or DONE')
+
+    def start_relay(self, selected):
+        """SSE heartbeat relay on :8000 in front of the engine/router (scripts/sse_relay.py).
+        Detached so it keeps serving after warm-up exits; no secrets in its environment."""
+        if selected.get('SSE_RELAY', '1') != '1':
+            return None
+        log = (self.run/'relay.log').open('ab')
+        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': os.environ.get('HOME', '/'), 'PORT': str(RELAY_PORT),
+               'ENGINE_PORT': selected['ENGINE_PORT'],
+               'SSE_HEARTBEAT_SECONDS': self.env.get('SSE_HEARTBEAT_SECONDS', '15')}
+        proc = subprocess.Popen([sys.executable, str(ROOT/'scripts/sse_relay.py')], env=env, stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        import socket
+        for _ in range(100):
+            if proc.poll() is not None: raise RuntimeError('SSE relay exited; see relay.log')
+            try:
+                socket.create_connection(('127.0.0.1', RELAY_PORT), timeout=1).close(); break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            raise RuntimeError('SSE relay did not open port 8000')
+        self.relay = proc
+        with self.lock:
+            self.record['sse_relay'] = {'pid': proc.pid, 'port': RELAY_PORT, 'engine_port': int(selected['ENGINE_PORT']),
+                                        'heartbeat_seconds': float(env['SSE_HEARTBEAT_SECONDS'])}
+            self.save()
+        return proc.pid
 
     def launch(self, image, selected):
         # Record installed version and file hash rather than asserting tag==source commit.
@@ -209,10 +242,12 @@ class Warm:
             try:
                 for process in self.record['launch_plan']['processes']:
                     check(f"http://127.0.0.1:{process['port']}", self.env['INFER_UPSTREAM_KEY'], self.data['model']['repo'])
+                if self.relay is not None:  # and the tunnel's front door, through the relay
+                    check(f'http://127.0.0.1:{RELAY_PORT}', self.env['INFER_UPSTREAM_KEY'], self.data['model']['repo'])
                 break
             except Exception:
                 state=self.command(['docker','inspect',self.name,'--format','{{.State.Running}}']).strip()
-                if state != 'true': raise RuntimeError('Engine stopped before health')
+                if state != 'true': raise EngineStopped('Engine stopped before health')
                 time.sleep(min(2,self.remaining()))
         self.completion([{'role':'user','content':'Reply hi.'}])
         self.completion([{'role':'user','content':'Count to three.'}],32,True)
@@ -256,8 +291,8 @@ class Warm:
         ram=self.stage('ram_gate',gate)
         selected=settings(self.data,self.env,ram)
         self.record.update(ram=ram,config=selected);self.save()
-        self.stage('launch_and_flag_validation',lambda:self.launch(image_id,selected))
-        self.stage('load_graph_and_health',self.health)
+        self.stage('sse_relay',lambda:self.start_relay(selected))
+        selected=self.launch_with_fit_fallback(image_id,selected)
         self.record['container_started_at'] = self.command(
             ['docker','inspect',self.name,'--format','{{.State.StartedAt}}']).strip()
         def replay():
@@ -266,12 +301,69 @@ class Warm:
         self.stage('prefix_replay',replay)
         self.publish_ready()
 
+    def engine_pool(self):
+        path = self.run/'engine.log'
+        return parse_pool(path.read_text(errors='replace') if path.exists() else '')
+
+    def launch_with_fit_fallback(self, image_id, selected):
+        """Launch at MAX_RUNNING_REQUESTS (128); if warm_logic.concurrency_fit fails, relaunch
+        once at FALLBACK_MAX_RUNNING_REQUESTS (64) with the 64 graph ladder, and flag it in
+        stdout/stderr, runs/warm-<id>.json ('concurrency') and ready.json. Returns the
+        settings actually serving. This is the only place warm-up acts on the decision."""
+        requested = int(selected['MAX_RUNNING_REQUESTS'])
+        context = int(selected['CONTEXT_LENGTH'])
+        per_stream = int(self.env.get('FIT_TOKENS_PER_STREAM', '32768'))
+        fallback = fallback_settings(selected, int(self.env.get('FALLBACK_MAX_RUNNING_REQUESTS', FALLBACK_RUNNING)))
+        self.stage('launch_and_flag_validation',lambda:self.launch(image_id,selected))
+        started = True
+        try:
+            self.stage('load_graph_and_health',self.health)
+        except EngineStopped:
+            if fallback is None: raise
+            started = False
+        fit = concurrency_fit(self.engine_pool(), requested, context, per_stream, started)
+        info = {'requested': requested, 'fit': fit, 'fallback_reason': None}
+        effective = selected
+        if fit['passed']:
+            print(f"FIT PASSED: max_running_requests={requested} at context {context}; "
+                  f"KV pool {fit['max_total_num_tokens']} tokens; full-context streams {fit['full_context_streams']}", flush=True)
+        elif fallback is None:
+            print(f"FIT WARNING at floor {requested}: {fit['reason']}; serving anyway", file=sys.stderr, flush=True)
+        else:
+            info['fallback_reason'] = fit['reason']
+            line = (f"FIT FALLBACK: max_running_requests {requested} -> {fallback['MAX_RUNNING_REQUESTS']} "
+                    f"(graphs {fallback['WARM_GRAPH_BS']}): {fit['reason']}. Flag Kai before traffic.")
+            print(line, flush=True); print(line, file=sys.stderr, flush=True)
+            with self.lock:
+                self.record['concurrency'] = info; self.save()
+            self.command(['docker','rm','-f',self.name]); self.created=False
+            if (self.run/'engine.log').exists():
+                (self.run/'engine.log').rename(self.run/f'engine-{requested}.log')
+            self.stage('fallback_launch',lambda:self.launch(image_id,fallback))
+            self.stage('fallback_health',self.health)
+            info['fallback_fit'] = concurrency_fit(self.engine_pool(), int(fallback['MAX_RUNNING_REQUESTS']),
+                                                   context, per_stream)
+            effective = fallback
+        info.update(effective=int(effective['MAX_RUNNING_REQUESTS']), cuda_graph_max_bs=int(effective['CUDA_GRAPH_MAX_BS']),
+                    warm_graph_bs=effective['WARM_GRAPH_BS'])
+        with self.lock:
+            self.record.update(concurrency=info, config=effective); self.save()
+        return effective
+
     def publish_ready(self):
         self.remaining()
         now=time.time(); elapsed=now-self.record['started_epoch']
         signal={'schema':1,'state':'ready','model':self.data['model']['repo'],'revision':self.data['model']['revision'],
                 'ready_epoch':now,'deadline_epoch':self.end,'container':self.name,'timing_file':str(self.path),
                 'tunnel_slot':self.tunnel_slot}
+        # Additive, schema stays 1. Netops reads these before routing traffic.
+        c = self.record.get('concurrency', {})
+        fit = c.get('fallback_fit') or c.get('fit') or {}
+        signal.update(max_running_requests_requested=c.get('requested'), max_running_requests_effective=c.get('effective'),
+                      fit_passed=(c.get('fit') or {}).get('passed'), fallback_reason=c.get('fallback_reason'),
+                      kv_pool_tokens=fit.get('max_total_num_tokens'), full_context_streams=fit.get('full_context_streams'),
+                      cuda_graph_max_bs=c.get('cuda_graph_max_bs'), warm_graph_bs=c.get('warm_graph_bs'),
+                      sse_relay=self.record.get('sse_relay'))
         self.record.update(state='ready',end_epoch=now,warm_seconds=elapsed,jit_start_epoch=jit_start(int(self.env['WINDOW_END']),elapsed))
         self.save()
         tmp=self.ready.with_suffix('.tmp');tmp.write_text(json.dumps(signal)+'\n')
@@ -305,6 +397,8 @@ def main(argv=None):
             warm.ready.unlink(missing_ok=True)
             if warm.created:
                 subprocess.run(['docker','rm','-f',warm.name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+            if warm.relay is not None and warm.relay.poll() is None:
+                warm.relay.terminate()
             print('WARM FAILED: '+type(exc).__name__+'; inspect '+str(warm.path),file=sys.stderr)
             return 1
     return 0
