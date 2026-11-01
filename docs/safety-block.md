@@ -49,119 +49,76 @@ Survey as of Nov 2026:
 - CPU-only fallback exists but is too slow for inline per-request + per-chunk checks at 64–128 concurrent streams; GPU slice is the plan.
 - The classifier adds VRAM pressure that competes with the serving model's KV pool. This must be accounted for in the 128-vs-64 fit check (see `warm_logic.concurrency_fit`): the classifier's reservation reduces pool headroom, so enabling SAFETY may shift the memory-fit fallback. Flagged as an open question to measure.
 
-## 4. Check flow
+## 4. Division of labor (gateway contract)
 
-Front door is the node SSE relay (`scripts/sse_relay.py`) on :8000, which already sits in front of the engine on :8001. The block is wired there, gated by `SAFETY=1` (off = today's behavior, byte-for-byte).
+Netops published the gateway↔node contract (`infer-gateway-safety`, `docs/safety-contract.md`, branch `safety-csam-block`). It moves all request/response handling to the gateway and leaves the node a single stateless scorer. This doc follows that contract; the earlier inline-relay design is superseded.
 
-**Input check (before inference).** Extract text from the request:
-- `/v1/chat/completions`: every message's text content (string or structured parts). Non-text parts (images) are marked present; image moderation is a separate open item (Shieldstral and ShieldGemma 2 can do images later).
-- `/v1/completions`: the prompt.
-- **Tool / reasoning content in the request** is user-supplied and is checked like any other text.
-- Long inputs are split into overlapping windows (`SAFETY_WINDOW_CHARS` 16000 / overlap 1000) so a 262K-context prompt is fully covered; all windows scored concurrently under a process-wide inflight semaphore.
-- Any window scoring ≥ threshold ⇒ block before the engine is ever contacted.
+**Gateway (Netops) owns:** extracting every client string from a request (`messages`, `prompt`, `input`, `suffix`, `system`, `instructions`, `tools`, `functions`, `response_format`), extracting generated text on the output side (visible content, `reasoning`/`reasoning_content`, tool-call names/arguments), 16,000-char windowing with 128-char overlap (≤4 pieces in parallel, any flagged piece blocks), the input check before anything goes upstream, the rolling streaming-output check (a call once 512 new chars arrive, or after 1 s of pending text, and at end of stream), refusing non-text parts (`image_url`, `input_audio`, `file`, `image`) with 400 before classification, fail-closed enforcement, key-kill, the global kill flag, sealing age-encrypted evidence to R2 Object Lock, and the NCMEC alert.
 
-**Streaming output check (rolling chunks).** As the engine streams, assistant deltas are accumulated and scored every `SAFETY_CHUNK_TOKENS` (default 64, approximated by chars/4) over a rolling window = last overlap already-checked + new text, prefixed with the last 2000 chars of the user prompt for context (only the assistant span is judged). A final partial chunk is scored at end-of-stream.
-- **Assistant reasoning / `reasoning_content` deltas and tool-call argument deltas are checked the same way** — they can carry generated text.
-- On an output hit mid-stream: cancel the engine request (close upstream so it aborts), seal the incident, and end the client stream with one `data: {"error": ..., "incident_id": ...}` event + `[DONE]`. Tokens already sent cannot be recalled — a reason to keep the chunk cadence small.
+**Node (Chief Engineer) owns:** one endpoint, `POST /v1/safety/csam`, that scores a single piece of text and returns a decision. Stateless, no evidence, no enforcement. The node is reached over the existing tunnel; the SSE relay routes `/v1/safety/*` to this scorer in-process (it adapts to the Shieldstral engine, which speaks `/v1/chat/completions` — it does not blind-proxy).
 
-**Non-streaming responses** are buffered and scored before returning.
+## 5. The node endpoint
 
-## 5. Thresholds and fail-closed
-
-- Score is Shieldstral's renormalised softmax over the yes/no answer token. Default decision threshold **0.5**; tune on the eval (section 10) and pin per-stage. Likely a lower (stricter) output threshold than input once we see FP/FN rates.
-- **Fail closed.** With `SAFETY=1`, if the classifier returns an error, times out, returns neither yes nor no, or `/health` is unhealthy, the request is **blocked** with reason `classifier_unavailable` (distinct from `content_blocked` in telemetry; both block). The relay never "fails open" to the engine while SAFETY is on.
-- If `SAFETY=1` cannot even construct (bad config, no recipients file) the node should refuse to advertise readiness — a safety-on node that can't block must not serve. (Readiness wiring is a follow-up; noted as open.)
-
-## 6. API contract: node classifier → gateway Worker
-
-The classifier verdict is produced and enforced **on the node** (block happens at the relay). The gateway needs to be told an incident happened so it can kill the key, set the global kill flag, and move evidence to WORM. Two mechanisms:
-
-1. **Response signal (always).** A blocked request returns an OpenAI-shaped error the Worker can recognize:
-   - Non-stream: HTTP **403**, body `{"error":{"message":"blocked by safety policy","type":"safety_block","code":"content_blocked"|"safety_unavailable","incident_id":"inc_<ts>_<rand>"}}`.
-   - Stream: 200 SSE, one `data: {"error":{...,"incident_id":"..."}}` event then `[DONE]`.
-   - Header on both: `X-Safety-Block: 1` and `X-Safety-Incident: inc_...` so the Worker can act without parsing the body.
-2. **Incident webhook (optional, `SAFETY_INCIDENT_WEBHOOK`).** On a `content_blocked` hit the relay POSTs a minimal JSON to a loopback/gateway endpoint Netops owns: `{incident_id, created_at, stage:"input"|"output", policy_version, model, request_id, key_fingerprint}`. **No content, no raw key.** `key_fingerprint` is a truncated hash the Worker passes down or that the relay derives from the forwarded Authorization; the Worker maps it back to the key to revoke.
-
-**Verdict JSON (internal, also the shape sealed):**
-```json
-{
-  "incident_id": "inc_20261101T143000Z_9f3a1c20",
-  "created_at": "2026-11-01T14:30:00Z",
-  "stage": "input",
-  "hit": true,
-  "reason": "content_blocked",
-  "score": 0.97,
-  "threshold": 0.5,
-  "policy_version": "sha256:1a2b3c4d5e6f7a8b",
-  "model": "mistralai/Shieldstral-1.0-3B",
-  "request_path": "/v1/chat/completions",
-  "request_id": "...",
-  "key_fingerprint": "sha256:...(truncated)"
-}
 ```
-Incident id: `inc_` + UTC compact timestamp + `_` + 8 random hex.
+POST {CLASSIFIER_ORIGIN}/v1/safety/csam
+Authorization: Bearer {CLASSIFIER_KEY}      # required when the node has a key set; separate from the engine key; never logged
+Content-Type: application/json
+{"text": "<utf-8 text>", "phase": "input" | "output"}
+```
+Success is **HTTP 200 only**, body `{"flag": true|false, "score": <finite number, higher = riskier>, "model": "<id@revision>"}`:
+- `flag` is the decision — the **node** applies the threshold (default 0.5 on Shieldstral's renormalised yes/no score). The gateway does not threshold; it records the score in sealed evidence and keeps the highest.
+- `model` identifies the classifier + version, e.g. `mistralai/Shieldstral-1.0-3B@<policy_version>`, so evidence is auditable to an exact classifier+policy.
+- The gateway **fails closed** on anything that is not a clean 200 of that shape. So the node returns a non-200 rather than guessing: **503** on classifier error/timeout/unavailability, **401** on bad/missing auth, **400** on a malformed body or bad `phase`, **405** on non-POST, **404** on other `/v1/safety/*`. The text is never echoed back.
+- **Canary:** the synthetic token `CANARY-CSAM-TEST-7f3a` makes the endpoint return `200 {flag:true}` **without calling the model**, so an end-to-end drill works even if the model is down. This is the only trigger; no real content exists anywhere in the code or tests.
 
-**Who does what on a hit:** relay blocks the request + seals the node-local evidence copy + fires the webhook/headers. **Gateway (Netops):** on the 403/`X-Safety-Block`, revoke that key, set the global kill flag (every request checks it; defaults to blocked if the flag store is unreachable), copy evidence to R2 object-lock, and trigger the NCMEC alert. The node also records a kill marker so it stops accepting that key locally even before KV propagation.
+Thresholds and fail-closed: the decision threshold lives in the node (tune per the eval in §9). "Fail closed" is realised jointly — the node surfaces unavailability as 503, and the gateway turns any non-200 into a refused request. When the node (hence the classifier) is down, inference is refused, which is intended.
 
-## 7. Evidence format
+## 6. Performance budget
 
-- Record = the verdict JSON above **plus** the full offending text(s) and any generated output captured.
-- Encrypted with **age** to Preetham's **public** recipients only: `age -R $SAFETY_AGE_RECIPIENTS_FILE` (placeholder `/etc/b300/safety/recipients.txt`). **This code never generates, reads, or touches any private key.** Decryption is Preetham's, offline.
-- JSON piped to `age` on **stdin** → `$SAFETY_SPOOL_DIR/<incident_id>.age`, mode 0600, write-once (never overwrite an existing id). Plaintext is never written to disk.
-- If the recipients file is missing/empty: still **block**, write nothing in plaintext, record a seal-failure so the gateway alert still fires and a human is paged. A safety block must never depend on sealing succeeding.
-- Node spool is a **staging** copy. The durable **write-once** store is **R2 Object Lock (compliance mode)** on the gateway side (Netops), which is also where the retention exemption lives.
-- **Retention:** this evidence is **exempt from the 90-day ZDR purge**. Preserved per **18 U.S.C. § 2258A(h)** as amended by the **REPORT Act (2024)**: a CyberTipline report triggers a **one-year** preservation obligation for the report contents and reasonably accessible related data; secure storage with minimized access, following the current **NIST Cybersecurity Framework**. Longer voluntary retention is allowed. **Counsel must confirm** the retention period, access controls, and whether any NCMEC-designated-vendor handling rules (NIST, minimized access, encryption, annual independent audit — § 2258B) apply to us.
+Per the contract: 3,000 ms timeout per call (`CLASSIFIER_TIMEOUT_MS`, node `SAFETY_TIMEOUT_SECONDS` defaults to 3 s to match). Streaming holds output until it is classified, so classifier latency adds directly to token delivery; at ~100 tok/s a stream makes ~1 output call/s. At 128 concurrent streams plan for **~130 output calls/s plus input calls**; output calls are ≤512+128 chars, input calls up to 16,000 chars (a 262K-token prompt ≈ 70 input calls, 4 in parallel, before the request starts). **Target p99 < 100 ms.** The node scorer is fully async, bounded by a process-wide inflight semaphore (`SAFETY_MAX_INFLIGHT`, default 128), reuses one aiohttp session to the engine, and never blocks the loop. A mocked-latency load test (`scripts/safety_loadtest.py`) drives 130 rps at concurrency 128 and reports p50/p95/p99 and non-200s against the 100 ms budget; it uses a mock classifier, not the real model, so the number it reports is the relay/endpoint overhead plus the injected latency, **not** real Shieldstral latency (that needs the model on B300 — untested).
 
-## 8. Notify alert payload (no content in the push)
+## 7. Evidence, retention, alert (gateway-owned; node does none of it)
 
-On a `content_blocked` hit, Notify push to Preetham's active iPhone (`devices_list` → active device). **No content, no key, no victim data.**
-- title: `Safety block — action needed`
-- summary/banner: `A request was blocked and the key was killed. Incident <incident_id>. File with NCMEC.`
-- body (markdown): incident id, UTC + ET timestamp, stage (input/output), policy_version, model, and a line "Decrypt the sealed evidence locally with your age key; do not paste content into chat." Plus the NCMEC reporting URL.
-- url: deep-links to the incident record in the gateway admin surface (Netops), not to any content.
-- Idempotency-Key = incident_id (one push per incident).
-- Routed as urgent/approval (page), not an FYI. Filing with NCMEC stays Preetham's manual legal step.
+All evidence handling moved to the gateway per the contract. For the record, the agreed shape (Netops implements, counsel confirms): evidence encrypted with **age** to Preetham's **public** key only, written to **R2 Object Lock (compliance mode, write-once)**, **exempt from the 90-day ZDR purge**, preserved per **18 U.S.C. § 2258A(h)** as amended by the **REPORT Act (2024)** — a CyberTipline report triggers a **one-year** preservation duty for the report and reasonably accessible related data, secured with minimized access per the current **NIST Cybersecurity Framework**; longer voluntary retention allowed. Counsel must confirm the period, access controls, and whether § 2258B designated-vendor rules (encryption, annual independent audit, access minimization) apply. The score the node returns is what the gateway records; the node keeps nothing. The **Notify alert** (no content, no key, incident id only, routed urgent, NCMEC filing is Preetham's manual step) is also gateway-fired.
 
-## 9. Config surface (node)
+## 8. Config surface (node)
 
-`SAFETY` (0/1), `SAFETY_URL` (loopback), `SAFETY_MODEL`, `SAFETY_THRESHOLD`, `SAFETY_CHUNK_TOKENS`, `SAFETY_WINDOW_CHARS`, `SAFETY_OVERLAP_CHARS`, `SAFETY_TIMEOUT_SECONDS`, `SAFETY_MAX_INFLIGHT`, `SAFETY_SPOOL_DIR`, `SAFETY_AGE_RECIPIENTS_FILE`, `SAFETY_AGE_BIN`, `SAFETY_INCIDENT_WEBHOOK`. `age` is an OS binary prerequisite in the node image.
+`SAFETY` (0/1), `SAFETY_URL` (classifier engine, loopback-only), `SAFETY_MODEL`, `SAFETY_MODEL_REVISION` (folds into the `model` id the endpoint returns; defaults to the policy version), `SAFETY_THRESHOLD`, `SAFETY_TIMEOUT_SECONDS` (default 3 s, matching the gateway), `SAFETY_MAX_INFLIGHT` (default 128), `SAFETY_CLASSIFIER_KEY` (optional; when set the `/v1/safety/csam` endpoint requires `Authorization: Bearer` it; separate from the inference key; never logged). The node runs the Shieldstral classifier engine as a prerequisite; `age`/evidence are gateway-side now, not a node dependency.
 
-## 10. Test plan
+## 9. Test plan
 
-**Unit (in this PR, fully offline, mocked classifier, inert placeholders only).**
-- Config parse/validate, incl. rejecting a non-loopback `SAFETY_URL` and a bad threshold.
-- Text extraction for string + structured chat parts, completions, non-text parts, bad JSON.
-- Softmax score parsing from synthetic logprob payloads.
-- Input gate: hit on the inert marker `TEST_TRIGGER_CSAM_PLACEHOLDER`, pass on benign text; long-input window splitting.
-- Output scanner: flags a chunk containing the marker, passes benign; reasoning/tool deltas checked.
-- Fail-closed: classifier raising / unhealthy ⇒ block with `classifier_unavailable`.
-- Seal: fake `age` binary writes a 0600 file, write-once, seal-failure still blocks and writes no plaintext; incident-id format.
-- `SAFETY=0` leaves the relay path untouched (reuse existing relay fixtures).
+**Unit (in this PR, fully offline, mocked classifier, inert canary only).**
+- Config parse/validate, incl. rejecting a non-loopback `SAFETY_URL`, a bad threshold, and the optional key; `model` id format.
+- `parse_score` yes/no softmax from synthetic logprob payloads.
+- `score_text`: the canary `CANARY-CSAM-TEST-7f3a` short-circuits to `flag:true` **without touching the model**; benign text gives `flag = score ≥ threshold`; a classifier failure propagates (→ 503).
+- Endpoint: 200 happy-path shape `{flag,score,model}`; 401 on missing/wrong key and 200 with the right key (and the key never appears in logs); 400 on a bad body/`phase`; 405 on GET; 503 when the classifier raises; 404 on other `/v1/safety/*`.
+- `SAFETY=0` leaves the relay path byte-for-byte untouched (reuses the existing relay fixtures).
+- A short in-process **load test** (`scripts/safety_loadtest.py`, also exercised as a unit test) drives the endpoint with a **mocked-latency** classifier at ~130 rps / 128 concurrency and asserts zero non-200s and p99 under the 100 ms budget. This measures endpoint/relay overhead + injected latency, **not** real model latency.
 
 **Red-team / real-model eval (plan only; needs Preetham + counsel approval; download nothing now).**
-- Measure recall (missed blocks) and false-block rate on **vetted, access-controlled benchmark sets**, used strictly under their terms — e.g. the classifier vendor's published safety eval sets, standard academic guard benchmarks (WildGuard, Aegis v2, UnsafeBench), and any NCMEC/industry-sanctioned evaluation corpus. **We never create, fetch, or store sexual content involving minors.** Non-explicit, abstract trigger phrasing and benign "false-positive bait" (adult, medical, parenting, abuse-prevention, coding) drive our own in-repo set.
-- Threshold tuning per stage from the FP/FN curve.
-- **End-to-end drill before any non-Preetham key exists:** a mocked/abstract trigger must demonstrably (1) block the request, (2) kill the key, (3) set the global kill flag, (4) seal encrypted evidence, (5) fire the Notify alert — proven once, start to finish.
-- Latency/throughput of the classifier at 64–128 concurrent streams, and the VRAM hit to the serving KV pool.
+- Measure recall (missed blocks) and false-block rate on **vetted, access-controlled benchmark sets**, used strictly under their terms — the classifier vendor's published safety eval sets, standard academic guard benchmarks (WildGuard, Aegis v2, UnsafeBench), and any NCMEC/industry-sanctioned evaluation corpus. **We never create, fetch, or store sexual content involving minors.** Benign "false-positive bait" (adult, medical, parenting, abuse-prevention, coding) plus the abstract canary drive our own in-repo set.
+- Threshold tuning from the FP/FN curve.
+- **End-to-end drill before any non-Preetham key exists:** firing the canary through the gateway must demonstrably (1) block the request, (2) kill the key, (3) set the global kill flag, (4) seal encrypted evidence, (5) fire the Notify alert — proven once, start to finish, across gateway + node.
+- Real Shieldstral latency/throughput at 64–128 concurrent streams against the p99 < 100 ms budget, and the VRAM hit to the serving KV pool.
 
-## 11. Honest timing (per component)
+## 10. Honest timing (per component)
 
-- Node classifier service + relay hook + unit tests (this PR): **drafted today**, ~1 day to review/harden.
-- Gateway enforcement (key-kill on 403, global kill flag with fail-closed default, incident endpoint, R2 object-lock WORM, NCMEC alert plumbing) — **Netops**, ~1–2 days.
-- Classifier model served on the node + fit/VRAM measurement: part of a bring-up window; single-GPU-slice serving not yet proven on B300.
+- Node `/v1/safety/csam` endpoint + relay route + unit tests + mocked load test (this PR): **drafted today**, ~0.5–1 day to review/harden.
+- Gateway enforcement — key-kill, global kill flag (fail-closed default), text extraction/windowing, R2 object-lock WORM evidence, NCMEC alert — **Netops**, draft on branch `safety-csam-block`; ~1–2 days to finish + verify.
+- Shieldstral classifier actually served on the node + real latency/VRAM fit: part of a bring-up window; single-GPU-slice serving and the p99 target are **not proven on B300**.
 - Threshold tuning + red-team eval + the end-to-end drill: ~1 day **after** approvals and eval-data access.
 - Counsel review of evidence handling / retention: separate, **no date we control**.
 
 **None of this is enforced today.** Total engineering ≈ 2–3 days once approvals land; the drill gates any non-Preetham access.
 
-## 12. Open questions
+## 11. Open questions
 
 **For Preetham:**
 1. Enforce-before-serve (option a) vs. take the /policy/safety claim down until the block is live and drilled (option b)? Recommendation: do (b) now (≈15-min site edit), keep only your key, restore the page after the drill passes (a).
 2. Which model: Shieldstral 3B only, or add Qwen3Guard-Stream 0.6B on the output path for token-level streaming (defense in depth, more VRAM)?
 3. Stage thresholds and how aggressive the output cadence is (latency vs. leakage of partial tokens before a mid-stream block).
 4. Scope confirm: image inputs — block now (route images through a multimodal guard) or text-only first and reject image parts while SAFETY=1?
-5. Path to your age public recipients file, and where the decrypt key lives (never on the node).
+5. The `CLASSIFIER_KEY` secret value (node + gateway share it; set via a masked secret card, never in chat) and the age public recipients file path for the gateway evidence store.
 
 **For counsel:**
 1. Confirm REPORT Act / § 2258A(h) handling: preservation period (≥1 year), secure-storage and minimized-access requirements, NIST CSF alignment.

@@ -14,14 +14,13 @@ Everything else (health, models, metrics, non-streaming completions) passes thro
 unchanged. A non-streaming request whose engine takes >100 s to first byte can still
 hit 524 at Cloudflare; clients should use stream=true for long work.
 Authorization passes through unchanged; raw keys are never logged or stored.
-With SAFETY=1, completion input/output is gated by safety.py, and sealed evidence
-contains only a truncated hash of Authorization. Other paths still pass through.
+With SAFETY=1, /v1/safety/csam scores text in-process via the classifier adapter.
+The gateway owns enforcement and evidence. Other paths still pass through.
 """
 import asyncio
-import hashlib
+import hmac
 import json
 import os
-import re
 import sys
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
@@ -110,7 +109,7 @@ class Relay:
         finally:
             resp.close()
 
-    async def stream(self, request, body, guard=None):
+    async def stream(self, request, body):
         pending = asyncio.ensure_future(self.request(request, body, True))
         out = resp = read = None
         try:
@@ -133,10 +132,6 @@ class Relay:
                 await out.write_eof()
                 return out
             event_stream = 'text/event-stream' in resp.headers.get('Content-Type', '')
-            if guard is not None and resp.status == 200 and resp.headers.get('Content-Encoding', 'identity') != 'identity':
-                return await guard.unavailable(resp, out)
-            if guard is not None and resp.status == 200 and not event_stream:
-                return await guard.buffered(resp, out)
             if out is None and (resp.status != 200 or not event_stream):
                 # Fast non-SSE answer (usually an error): pass it through exactly.
                 out = web.StreamResponse(status=resp.status, reason=resp.reason,
@@ -176,15 +171,9 @@ class Relay:
                 read = None
                 if not chunk:
                     break
-                if guard is not None:
-                    if not await guard.write(chunk, resp, out):
-                        return out
-                    continue
                 await out.write(chunk)
                 tail = (tail + chunk)[-4:]
                 boundary = tail.endswith(b'\n\n') or tail.endswith(b'\r\n\r\n')
-            if guard is not None:
-                return await guard.finish(resp, out)
             await out.write_eof()
             return out
         finally:
@@ -203,9 +192,11 @@ class SafetyRelay(Relay):
         import safety
         self.safety, self.config, self.classifier = safety, config, classifier
         self.safety_session = None
+        self.inflight = None
 
     async def start(self, app):
         await super().start(app)
+        self.inflight = self.safety.inflight_semaphore(self.config.max_inflight)
         self.safety_session = ClientSession(timeout=ClientTimeout(total=self.config.timeout_seconds),
                                             connector=TCPConnector(limit=0), trust_env=False)
         if self.classifier is None:
@@ -215,159 +206,40 @@ class SafetyRelay(Relay):
         await self.safety_session.close()
         await super().stop(app)
 
-    @staticmethod
-    def protected(request):
-        return request.method == 'POST' and request.path in ('/v1/chat/completions', '/v1/completions')
-
-    def request(self, request, body, stream):
-        # The enabled output gate needs readable JSON as well as readable SSE.
-        return super().request(request, body, stream or self.protected(request))
-
-    async def handle(self, request):
-        if not self.protected(request):
-            return await super().handle(request)
-        body = await request.read()
-        stream = wants_stream(request.method, request.headers.get('Content-Type'), body)
-        texts = self.safety.request_texts(request.path, body)
-        result = await self.safety.check_input(self.classifier, texts)
-        if result.blocked:
-            return await self.block(request, texts, [], result, stream)
-        if stream:
-            return await self.stream(request, body, SafetyStream(self, request, texts))
+    async def score(self, request):
+        if request.method != 'POST':
+            return web.json_response({'error': 'method not allowed'}, status=405, headers={'Allow': 'POST'})
+        if self.config.classifier_key:
+            expected = ('Bearer ' + self.config.classifier_key).encode('utf-8')
+            supplied = request.headers.get('Authorization', '').encode('utf-8', errors='surrogatepass')
+            if not hmac.compare_digest(supplied, expected):
+                return web.json_response({'error': 'unauthorized'}, status=401)
         try:
-            resp = await self.request(request, body, False)
-        except (ClientError, OSError):
-            return unavailable()
-        try:
-            return await self.buffered(request, texts, resp, False)
-        finally:
-            resp.close()
-
-    async def block(self, request, texts, generated, result, stream, out=None):
-        incident = {'stage': result.stage, 'score': result.score, 'reason': result.reason,
-                    'window': result.window, 'request_path': request.path,
-                    'key_fingerprint': hashlib.sha256(request.headers.get('Authorization', '').encode()).hexdigest()[:16],
-                    'request_id': request.headers.get('X-Request-ID', ''),
-                    'texts': texts, 'generated_output': generated}
-        ident = await self.safety.seal_incident(self.config, incident)
-        await self.safety.notify_incident(self.config, self.safety_session, ident)
-        payload = {'error': {'message': 'blocked by safety policy', 'type': 'safety_block',
-                             'code': 'content_blocked' if result.hit else 'safety_unavailable',
-                             'incident_id': ident}}
-        if not stream:
-            return web.json_response(payload, status=403)
-        if result.stage == 'output':
-            payload['incident_id'] = ident
-        if out is None:
-            out = web.StreamResponse(status=200, headers=SSE_HEADERS)
-            await out.prepare(request)
-        await out.write(b'data: ' + json.dumps(payload).encode() + b'\n\ndata: [DONE]\n\n')
-        await out.write_eof()
-        return out
-
-    async def buffered(self, request, texts, resp, stream, out=None):
-        data = await resp.read()
-        generated = []
-        if resp.status == 200:
-            try:
-                if resp.headers.get('Content-Encoding', 'identity') != 'identity':
-                    raise self.safety.ClassifierUnavailable('unreadable completion')
-                generated = self.safety.completion_texts(data)
-                result = await self.safety.check_input(self.classifier, generated, stage='output')
-            except self.safety.ClassifierUnavailable:
-                result = self.safety.verdict(self.config, stage='output', reason='classifier_unavailable')
-            if result.blocked:
-                resp.close()
-                return await self.block(request, texts, generated, result, stream, out)
-        if out is not None:
-            await out.write(error_event(resp.status, data.decode(errors='replace')))
-            await out.write_eof()
-            return out
-        return web.Response(status=resp.status, reason=resp.reason, headers=forward_headers(resp.headers), body=data)
-
-
-class SafetyStream:
-    def __init__(self, relay, request, texts):
-        self.relay, self.request, self.texts = relay, request, texts
-        self.context = '\n'.join(text[6:] for text in texts if text.startswith('user: ')) \
-            if request.path == '/v1/chat/completions' else '\n'.join(texts)
-        self.buffer, self.scanners = b'', {}
-
-    async def buffered(self, resp, out):
-        return await self.relay.buffered(self.request, self.texts, resp, True, out)
-
-    async def unavailable(self, resp, out):
-        result = self.relay.safety.verdict(self.relay.config, stage='output', reason='classifier_unavailable')
-        return await self.block(result, resp, out)
-
-    async def block(self, result, resp, out):
-        # Previously sent partial tokens cannot be recalled. Close upstream before sealing.
-        resp.close()
-        return await self.relay.block(self.request, self.texts, [s.text for s in self.scanners.values()],
-                                      result, True, out)
-
-    async def event(self, event, resp, out):
-        fields = [line[5:].lstrip(b' ') for line in event.splitlines() if line.startswith(b'data:')]
-        if not fields:
-            await out.write(event)
-            return True
-        data = b'\n'.join(fields)
-        if data.strip() == b'[DONE]':
-            self.buffer = b''
-            await self.finish(resp, out, event)
-            return False
-        try:
-            if resp.headers.get('Content-Encoding', 'identity') != 'identity':
+            if request.content_type != 'application/json':
                 raise ValueError
-            payload = json.loads(data)
-            choices = payload.get('choices', [])
-            if not isinstance(choices, list):
+            body = json.loads((await request.read()).decode('utf-8'))
+            if (not isinstance(body, dict) or not isinstance(body.get('text'), str)
+                    or body.get('phase') not in ('input', 'output')):
                 raise ValueError
-            for index, choice in enumerate(choices):
-                key = choice.get('index', index)
-                if key not in self.scanners:
-                    self.scanners[key] = self.relay.safety.OutputScanner(
-                        self.relay.classifier, self.relay.config, self.context)
-                delta = choice.get('delta', {'content': choice.get('text', '')})
-                if not isinstance(delta, dict):
-                    raise ValueError
-                result = await self.scanners[key].feed(delta)
-                if result is not None:
-                    await self.block(result, resp, out)
-                    return False
-        except (ValueError, TypeError, AttributeError, UnicodeError):
-            result = self.relay.safety.verdict(self.relay.config, stage='output', reason='classifier_unavailable')
-            await self.block(result, resp, out)
-            return False
-        await out.write(event)
-        return True
+            # JSON escapes must also represent valid UTF-8 text.
+            body['text'].encode('utf-8')
+        except (ValueError, RecursionError, web.HTTPRequestEntityTooLarge):
+            return web.json_response({'error': 'invalid request'}, status=400)
 
-    async def write(self, chunk, resp, out):
-        self.buffer += chunk
-        while True:
-            boundary = re.search(rb'\r?\n\r?\n', self.buffer)
-            if boundary is None:
-                return True
-            event, self.buffer = self.buffer[:boundary.end()], self.buffer[boundary.end():]
-            if not await self.event(event, resp, out):
-                return False
+        async def bounded_score():
+            async with self.inflight:
+                return await self.safety.score_text(self.classifier, body['text'], body['phase'])
 
-    async def finish(self, resp, out, done=b''):
-        if self.buffer:
-            event, self.buffer = self.buffer, b''
-            # Keep a final event boundary before any synthesized safety error.
-            if not re.search(rb'\r?\n\r?\n$', event):
-                event += b'\n\n'
-            if not await self.event(event, resp, out):
-                return out
-        for scanner in self.scanners.values():
-            result = await scanner.flush()
-            if result is not None:
-                return await self.block(result, resp, out)
-        if done:
-            await out.write(done)
-        await out.write_eof()
-        return out
+        try:
+            # Queue time counts toward the same per-call deadline as model time.
+            flag, score, model = await asyncio.wait_for(bounded_score(), self.config.timeout_seconds)
+        except Exception:
+            # Includes ClassifierUnavailable/timeouts; never log text, auth or engine errors.
+            return web.json_response({'error': 'classifier unavailable'}, status=503)
+        return web.json_response({'flag': flag, 'score': score, 'model': model})
+
+    async def unknown_safety_path(self, request):
+        return web.json_response({'error': 'not found'}, status=404)
 
 
 def make_app(upstream, heartbeat=15.0, safety_config=None, classifier=None):
@@ -384,6 +256,9 @@ def make_app(upstream, heartbeat=15.0, safety_config=None, classifier=None):
     app = web.Application(client_max_size=512 * 1024 * 1024)
     app.on_startup.append(relay.start)
     app.on_cleanup.append(relay.stop)
+    if isinstance(relay, SafetyRelay):
+        app.router.add_route('*', '/v1/safety/csam', relay.score)
+        app.router.add_route('*', '/v1/safety/{tail:.*}', relay.unknown_safety_path)
     app.router.add_route('*', '/{tail:.*}', relay.handle)
     return app
 

@@ -178,18 +178,18 @@ p.joinpath('runtime.json').write_text(json.dumps({'image':os.environ['ENGINE_IMA
 PYMETA
 phase relay
 if [[ $SSE_RELAY == 1 ]]; then
-    # SAFETY=1 also requires age (an OS binary) preinstalled in the node image and public recipients provisioned.
+    # SAFETY=1 requires a node-local Shieldstral engine; the relay exposes /v1/safety/csam.
+    # Evidence sealing belongs to the gateway.
     # Tunnel ingress stays http://127.0.0.1:8000; the relay owns it and the engine moves to ENGINE_PORT.
     [[ $ENGINE_PORT != "$PORT" ]] || die 'SSE_RELAY=1 requires ENGINE_PORT different from PORT'
     env -i PATH="$PATH" HOME="$HOME" python3 -c 'import aiohttp' 2>/dev/null || die 'SSE relay needs aiohttp on the host (requirements-node.txt)'
     if [[ ! -f $RUN_DIR/relay.pid ]] || ! kill -0 "$(cat "$RUN_DIR/relay.pid")" 2>/dev/null; then
         relay_safety_env=()
-        for name in SAFETY SAFETY_URL SAFETY_MODEL SAFETY_THRESHOLD SAFETY_CHUNK_TOKENS SAFETY_WINDOW_CHARS \
-                    SAFETY_OVERLAP_CHARS SAFETY_TIMEOUT_SECONDS SAFETY_MAX_INFLIGHT SAFETY_SPOOL_DIR \
-                    SAFETY_AGE_RECIPIENTS_FILE SAFETY_AGE_BIN SAFETY_INCIDENT_WEBHOOK; do
+        for name in SAFETY SAFETY_URL SAFETY_MODEL SAFETY_MODEL_REVISION SAFETY_THRESHOLD \
+                    SAFETY_TIMEOUT_SECONDS SAFETY_MAX_INFLIGHT SAFETY_CLASSIFIER_KEY; do
             [[ ! -v $name ]] || relay_safety_env+=("$name=${!name}")
         done
-        # Minimal environment: the relay never sees keys; Authorization passes through per request.
+        # Inference Authorization passes through; classifier auth has its own optional key.
         nohup env -i PATH="$PATH" HOME="$HOME" PORT="$PORT" ENGINE_PORT="$ENGINE_PORT" SSE_HEARTBEAT_SECONDS="${SSE_HEARTBEAT_SECONDS:-15}" \
             "${relay_safety_env[@]}" \
             python3 "$KIT_ROOT/scripts/sse_relay.py" </dev/null >> "$RUN_DIR/relay.log" 2>&1 9>&- &
