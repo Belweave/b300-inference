@@ -115,31 +115,33 @@ class TransferTests(unittest.TestCase):
                     NODE_SSH_PORT='22',NODE_SSH_KEY_PATH='/keys/node',PUSH_WORKERS='2')
 
     def test_external_relay_exact_up_and_down_argv(self):
-        run=Mock(return_value=subprocess.CompletedProcess([],0))
+        run=Mock(return_value=subprocess.CompletedProcess([],0,stdout='window window-abc serving via relay port 18042, auto-down at 2000000000\n'))
         env={'RELAY_SH':'/netops/relay.sh'}
-        relay.call(['up','window-abc','ubuntu@node','/keys/node'],env,run)
-        self.assertEqual(run.call_args.args[0],['/netops/relay.sh','up','window-abc','ubuntu@node','/keys/node'])
+        args=['up','window-abc','ubuntu@node','--port','2222','--key','/keys/node','--expires','2000000000']
+        self.assertEqual(relay.call(args,env,run),18042)
+        self.assertEqual(run.call_args.args[0],['/netops/relay.sh',*args])
         relay.call(['down','window-abc'],env,run)
         self.assertEqual(run.call_args.args[0],['/netops/relay.sh','down','window-abc'])
 
     def test_remote_relay_passes_secret_only_through_stdin(self):
-        run=Mock(return_value=subprocess.CompletedProcess([],0))
+        run=Mock(return_value=subprocess.CompletedProcess([],0,stdout='RELAY_PORT=18043\n'))
         env={'RELAY_SH':'/netops/relay.sh','RELAY_HOST':'user@relay','CF_TUNNEL_TOKEN':'test-only-token'}
-        relay.call(['up','window-abc','ubuntu@node','/relay/key'],env,run)
+        args=['up','window-abc','ubuntu@node','--port','2200','--key','/relay/key','--expires','2000000000']
+        self.assertEqual(relay.call(args,env,run),18043)
         self.assertEqual(run.call_args.args[0][0],'ssh')
         self.assertNotIn('test-only-token',' '.join(run.call_args.args[0]))
         payload=json.loads(run.call_args.kwargs['input'])
-        self.assertEqual(payload['argv'],['/netops/relay.sh','up','window-abc','ubuntu@node','/relay/key'])
+        self.assertEqual(payload['argv'],['/netops/relay.sh',*args])
         self.assertEqual(payload['env']['CF_TUNNEL_TOKEN'],'test-only-token')
 
     def test_push_calls_netops_interface_then_rsyncs_image(self):
         with tempfile.TemporaryDirectory() as directory:
-            env=self.make_stage(directory); env['RELAY_SH']='/netops/relay.sh'
+            env=self.make_stage(directory); env['RELAY_SH']='/netops/relay.sh'; env['NODE_SSH_PORT']='2222'
             run=Mock(return_value=subprocess.CompletedProcess([],0))
             push.push('ubuntu@node',env,run)
             commands=[c.args[0] for c in run.call_args_list]
             self.assertEqual(commands[0][0],'ssh')
-            self.assertEqual(commands[1],['/netops/relay.sh','push-weights','ubuntu@node',directory+'/fp8/weights','/data/weights/fixture','/keys/node'])
+            self.assertEqual(commands[1],['/netops/relay.sh','push-weights','ubuntu@node',directory+'/fp8/weights','/data/weights/fixture','--port','2222','--key','/keys/node'])
             self.assertEqual(commands[2][0],'rsync')
             self.assertIn(directory+'/fp8/images/engine.tar.zst',commands[2])
 

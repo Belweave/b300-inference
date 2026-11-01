@@ -34,6 +34,6 @@ extra = json.loads(e.get('ENGINE_EXTRA_ARGS_JSON', '[]'))
 if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
     raise SystemExit('ENGINE_EXTRA_ARGS_JSON must be a JSON string array')
 # Network binding is fixed by the kit, never overridden by extras.
-if any(x.split('=')[0] in ('--host', '--port') for x in extra):
-    raise SystemExit('Host/port overrides are not allowed')
+if any(x.split('=')[0] in ('--host', '--port', '--api-key', '--api-key-file', '--admin-api-key') for x in extra):
+    raise SystemExit('Host/port/auth overrides are not allowed')
 sys.stdout.buffer.write(b'\0'.join(x.encode() for x in args + extra + common) + b'\0')

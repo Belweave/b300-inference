@@ -15,3 +15,6 @@ config/account.env
 staging/
 *.safetensors
 *.tar.zst
+
+node.env
+client.env

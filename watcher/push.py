@@ -54,15 +54,14 @@ def push(target, env=None, run=subprocess.run):
     run = bounded_run
     run(ssh(env)+[target, 'mkdir -p '+shlex.quote(destination)+' '+shlex.quote(incoming)], check=True)
     if transfer_weights and env.get('RELAY_SH'):
-        if env.get('NODE_SSH_PORT', '22') != '22':
-            raise ValueError('Netops relay.sh cannot pass a non-22 node SSH port')
         if env.get('RELAY_HOST'):
             relay_source = str(Path(env['RELAY_STAGING_DIR'])/env.get('MODEL_VARIANT', 'fp8')/'weights')
             relay_key = env['RELAY_NODE_SSH_KEY_PATH']
         else:
             relay_source = str(source/'weights')
             relay_key = env['NODE_SSH_KEY_PATH']
-        relay_call(['push-weights', target, relay_source, destination, relay_key], env, run)
+        relay_call(['push-weights', target, relay_source, destination,
+                    '--port', env.get('NODE_SSH_PORT', '22'), '--key', relay_key], env, run)
     elif transfer_weights:
         workers = int(env.get('PUSH_WORKERS', '4'))
         if not 1 <= workers <= 16:

@@ -2,8 +2,9 @@
 
 A single-node inference kit for a four-hour, 8× NVIDIA B300 rental. A Mac watches
 one national compute grid account, accepts a normalized SSH claim, uploads the
-kit, and retrieves benchmark artifacts. No provider integration, purchase,
-tunnel connection, remote repository, or deployment has been performed.
+kit, and retrieves benchmark artifacts. The kit is versioned in a private GitHub
+repository. No provider integration, purchase, tunnel connection, or deployment
+has been performed by this kit-building session.
 
 The first window is a test. Capacity, latency, cold start, chat correctness, and
 handoff are **not yet measured on B300**. Image/model support below is based on
@@ -36,9 +37,13 @@ shards, with at least 20 GB free. These are planning allowances, not measured pe
 2. Copy `config/account.env.example` to `config/account.env`; it holds one account
    name and a hook path only. Credentials come from the environment or a future
    Keychain hook. **No account lists, rotation, or multi-account automation exist.**
-3. Export secrets through your credential manager. Do not fill secret values into
-   `.env.example`, account config, shell scripts, plist, command text, or any file.
-   `.env.example` lists names only and is not a configuration to source wholesale.
+3. Netops provisions mode-600 `~/.config/b300/node.env` on the Mac. The watcher
+   copies it opaquely with `scp -p` and remote `chmod 600`; it never reads or sources
+   its contents on the Mac. Set `MAC_NODE_ENV_FILE` to change the source path. Node
+   bootstrap sources `NODE_ENV_FILE` (default `~/node.env`) if present. `client.env`
+   stays on the Mac and is not used by this kit. Other credentials can come from
+   the environment. Never put secrets in templates, the repo, argv, or the plist.
+   `.env.example` lists names only; do not source it wholesale.
 4. Trust the assigned host's SSH host key through an independently verified
    channel. SSH uses strict host checking and an existing identity path from env;
    the kit does not create or copy private keys. Set `NODE_SSH_KEY_PATH`.
@@ -52,7 +57,7 @@ shards, with at least 20 GB free. These are planning allowances, not measured pe
 `bootstrap.sh` without `--claim` runs **on the node**. Reuse its `RUN_ID` and original
 `WINDOW_END` for an idempotent retry. It reuses running containers, verifies weights,
 and does not extend the rental deadline. A stopped run needs a new ID. Manual
-teardown: `RUN_ID=<id> ./teardown.sh`, with the upstream key exported for metrics.
+teardown: `RUN_ID=<id> ./teardown.sh`; it also loads the private node env for metrics.
 An independent node-local timer survives SSH disconnect and begins teardown at
 `WINDOW_END - 600`; a reboot does not preserve that timer. Provider expiry remains
 the ultimate cutoff. This kit stops workloads; it does not release a billable
@@ -91,7 +96,7 @@ inbound SSH. The old `TUNNEL` selector is replaced by `NETWORK_MODE`.
 
 In SSH mode the watcher uses pushed images and weights (or an existing volume),
 not outbound node downloads. The node only serves loopback and reports `ready`;
-the **relay dials into it** with `-L`. Only inbound SSH port 22 is required. No
+the **relay dials into it** with `-L`. Only the claim's inbound SSH port is required. No
 Docker public ports are published. Keep the node's host/provider ingress policy
 at SSH-only, including blocking distributed engine/NCCL ports from outside.
 
@@ -101,9 +106,11 @@ configure `RELAY_SH`, optionally `RELAY_HOST`, and existing SSH key paths. The
 watcher calls its exact `up`, `down`, and `push-weights` interfaces. A stable claim
 ID gives the same relay identity on retries. `up` is called only after node
 readiness; `down` after the node's drain/stop state, or on expiry/error cleanup.
-Two overlapping windows get two relay ports/replicas on the same tunnel. Netops
-must address port collisions, relay-local expiry, and health-aware route removal;
-Mac failure can otherwise leave relay processes running past a window.
+Two overlapping windows get two relay ports/replicas on the same tunnel. The
+updated helper accepts the claim SSH port, chooses an unused port in 18000–18999,
+checks cloudflared 2026.10.7, and self-tears-down at `--expires`. The wrapper records
+the selected port/expiry in `runs/<id>/relay.status.json`. Netops still needs to
+qualify health-aware withdrawal, simultaneous reservations, and retry supervision.
 
 For nodes allowing outbound SSH but not HTTPS, `SSH_DIRECTION=reverse` enables
 `scripts/reverse-tunnel.sh` with loopback `-R`, keepalives and reconnect. This is
@@ -126,8 +133,16 @@ requires 401 for unauthenticated model listing, verifies authenticated model
 listing, then requests a real completion. [Source evidence and test scope](docs/health-contract.md).
 Use `INFER_UPSTREAM_KEY` in env. `ORIGIN_KEY` is a deprecated fallback, warns once
 per process family when used, and is scheduled for removal next release.
-Secrets travel via anonymous SSH/Docker stdin pipes and env; never env files.
-Docker logging is disabled and attached engine output is redacted before disk.
+The full kit sends engine secrets through Docker stdin, keeping them out of Docker
+configuration. vLLM uses `VLLM_API_KEY` internally; SGLang has no verified native
+env/file option and retains a narrow inner-process `--api-key` fallback, visible
+in `ps`/`/proc`. SGLang’s inspected startup logger does not mask this field. Raw
+`docker logs` could otherwise retain it: the kit sets `--log-driver none` and
+filters engine stdout/stderr through `redact.py` before disk. Teardown re-filters
+all diagnostic archive members. The short live-node recipe instead uses name-only
+`-e` (visible in Docker inspect) and in-container redaction.
+[Auth source evidence and residual exposure](docs/auth-contract.md).
+[Interactive live-node instructions](docs/live-node.md).
 
 Teardown collects diagnostics, optionally invokes a tested `DRAIN_HOOK` to stop
 admission, and waits for running **and queued** request gauges to be zero for three
@@ -196,12 +211,26 @@ The kit's baseline is a conservative experiment, not a claim of optimal settings
 | Setting | SGLang | vLLM |
 |---|---|---|
 | Parallelism | `--tp 8` | `--tensor-parallel-size 8` |
-| Capacity | `--max-running-requests 256` | `--max-num-seqs 256` |
+| Capacity | `--max-running-requests 64` | `--max-num-seqs 64` |
 | Prefill | `--chunked-prefill-size 4096` | `--enable-chunked-prefill --max-num-batched-tokens 4096` |
-| Graph ceiling | `--cuda-graph-max-bs-decode 256` | `--compilation-config '{"max_cudagraph_capture_size":256}'` |
-| Memory/context | `--mem-fraction-static 0.80 --context-length 32768` | `--gpu-memory-utilization 0.80 --max-model-len 32768` |
-| Auth/network | `--host 127.0.0.1 --port 8000 --api-key` from env | same |
+| Graph ceiling | `--cuda-graph-max-bs-decode 64` | `--compilation-config '{"max_cudagraph_capture_size":64}'` |
+| Memory/context | `--mem-fraction-static 0.80 --context-length 409600` | `--gpu-memory-utilization 0.80 --max-model-len 409600` |
+| Auth/network | loopback :8000; inner argv fallback | loopback :8000; `VLLM_API_KEY` env |
 | Native chat | `--reasoning-parser auto --tool-call-parser auto` | `--tokenizer-mode deepseek_v41 --reasoning-parser deepseek_v41 --tool-call-parser deepseek_v41 --enable-auto-tool-choice` |
+
+`PROFILE=longctx` is the default; both engine containers add `--cap-add SYS_NICE`.
+`PROFILE=throughput` selects `config/throughput.env`, preserving the old 32,768
+context / 256 running / 256 graph ceiling. Explicit exported settings override
+preset defaults. Neither preset is a measured capacity guarantee.
+
+The [V4.1 cookbook's long-context section](https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.md)
+emphasizes prefix reuse, KV offload and session affinity, with settings tied to
+specific hardware/topology/engine images. Its static examples of 16K/32K prefill
+and 0.70–0.85 memory fractions are AMD configurations, not a verified match for
+this eight-B300 409,600-context cell. Keep prefill **4096** and memory **0.80** as
+conservative unmeasured defaults; do not transplant AMD/offload flags. A long
+context cap does not reserve enough KV cache for 64 full-length prompts. Benchmark
+actual prompt lengths, cache reuse and memory before tuning or selling capacity.
 
 Keep KV dtype and kernel selection automatic: forcing FP8 KV would override this
 model's native FP4 design. Do not force an old FlashAttention/DeepGEMM backend.
@@ -216,9 +245,10 @@ copy of an eight-B300 high-throughput cell. DP attention can avoid attention TP
 collectives while EP redistributes experts, but adds routing/collective costs and
 changes cache placement. Keep the better measured TTFT/TPOT result. vLLM dp_ep is
 intentionally rejected until its topology is separately configured. Sweep graph
-ceilings and capacity together; 1024 client streams may queue behind a 256-request
-engine cap. A 1M architectural context does not mean 1024 simultaneous 1M prompts
-fit. These defaults cap requests at 32K.
+ceilings and capacity together; the existing client sweep through 1024 streams
+now queues behind a **64-request** engine cap. A 1M architectural context does
+not mean simultaneous full-length prompts fit. The default per-request cap is
+409,600 tokens, with prompt plus output constrained by engine memory.
 
 ## Weight delivery and window budget
 
@@ -283,7 +313,10 @@ For push, the relay/staging host **upload** rate is the bottleneck: the base
 checkpoint alone is about 68–70 min at 1 Gbit/s or 6.8–7 min at 10 Gbit/s; NVFP4
 is about 57 min at 1 Gbit/s. A nearby relay or NVFP4 can materially shorten staging.
 These are budgets, not provider
-promises. Xet/CDN throughput can be lower. A full 510 GB hash pass alone takes
+promises. The long-context profile admits fewer concurrent requests (64 versus
+256); long prefills, cache pressure and compilation may change these allowances.
+The 409,600 cap is not a measured speed or cold-start claim. Xet/CDN throughput
+can be lower. A full 510 GB hash pass alone takes
 about 1.7–8.5 min at 5–1 GB/s disk read throughput. Record real phase times before
 committing to an operating margin. Container pull and weight pull run concurrently,
 so their wall-time contribution is approximately their maximum, not their sum.
@@ -325,7 +358,9 @@ both direct loopback and the public Worker separately before accepting customers
 ## Cost and revenue
 
 Assumed price: $4/GPU-hour × 8 = **$32/hour**, **$128 per four-hour window**.
-This is a scenario supplied for planning, not a grid quotation. Throughput =
+This is a scenario supplied for planning, not a grid quotation. The new 64-request
+long-context limit can reduce billable aggregate throughput; do not reuse results
+from the optional 256-request throughput profile in these calculations. Throughput =
 **PLACEHOLDER until benchmarked**. No benchmark revenue is assumed.
 
 Let C = cold-start minutes, B = benchmark/nonbillable minutes (0 for an ordinary
@@ -359,8 +394,9 @@ match the Worker/billing contract; never treat raw engine token counters as reve
 
 ## Environment reference
 
-All secrets are caller-exported only. The scripts do not automatically source
-`.env`; an empty name in `.env.example` is not an instruction to create a secret file.
+The watcher copies only the provisioned node env file; node entrypoints source
+`NODE_ENV_FILE` when present, then use caller-exported values for other settings.
+The kit never sources `.env.example`; an empty name is not a secret-file template.
 
 | Names | Default / purpose |
 |---|---|
@@ -377,6 +413,8 @@ All secrets are caller-exported only. The scripts do not automatically source
 | `WEIGHTS_S3_URI`, `S3_ENDPOINT_URL` | Existing mirror prefix; optional R2/S3-compatible endpoint; no credentials in URLs |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` | Environment credentials for s5cmd; no credential files shipped |
 | `ARTIFACT_S3_URI` | Optional artifact upload prefix; 90-second upload bound, local archive retained on failure |
+| `PROFILE` | longctx (409600/64/64) or throughput (32768/256/256); context/running/graph |
+| `MAC_NODE_ENV_FILE`, `NODE_ENV_FILE` | Mac ~/.config/b300/node.env; node ~/node.env; paths only, opaque copy + chmod 600 |
 | `RUN_ID`, `WINDOW_END`, `WINDOW_MINUTES` | Run ID; actual expiry epoch preferred; fallback 240 min from node bootstrap |
 | `PORT`, `GATEWAY_PORT`, `GATEWAY` | 8000 (required contract), 4000, none |
 | `NETWORK_MODE`, `SSH_DIRECTION` | auto / cloudflared / ssh; forward / reverse |
@@ -390,8 +428,8 @@ All secrets are caller-exported only. The scripts do not automatically source
 | `TARGET_TTFT_MS`, `TARGET_TPOT_MS` | 2000, 50; illustrative targets, not promised SLA |
 | `CONCURRENCY` | 16,32,64,128,256,512,1024 |
 | `OUTPUT_TOKENS`, `PROMPT_REPEATS`, `REQUESTS_PER_STREAM`, `REQUEST_TIMEOUT_SECONDS` | 256, 64, 2, 180; synthetic workload controls |
-| `MAX_RUNNING_REQUESTS`, `CHUNKED_PREFILL_SIZE`, `CUDA_GRAPH_MAX_BS` | 256, 4096, 256 |
-| `MEM_FRACTION`, `CONTEXT_LENGTH`, `PARALLELISM`, `SPECULATION` | .80, 32768, tp / dp_ep, none / dspark |
+| `MAX_RUNNING_REQUESTS`, `CHUNKED_PREFILL_SIZE`, `CUDA_GRAPH_MAX_BS` | 64, 4096, 64 |
+| `MEM_FRACTION`, `CONTEXT_LENGTH`, `PARALLELISM`, `SPECULATION` | .80, 409600, tp / dp_ep, none / dspark |
 | `ENGINE_EXTRA_ARGS_JSON` | JSON argv string array, no shell evaluation; do not include secrets |
 | `MIN_FREE_GB`, `HEALTH_TIMEOUT_SECONDS` | 650 budget minus existing shards; 2400 seconds, also bounded by window |
 | `HF_MAX_WORKERS`, `HF_XET_HIGH_PERFORMANCE`, `HASH_WORKERS` | 16, 1, 4 |
@@ -403,7 +441,7 @@ All secrets are caller-exported only. The scripts do not automatically source
 * `bootstrap.sh`, `loadtest.sh`, `teardown.sh`: node lifecycle and Mac `--claim` entry.
 * `scripts/`: atomic status, checkpoint verification, argv generation, in-memory
   secret transport, authenticated HTTP, smoke, drain/deadline, redaction, benchmark, lint.
-* `config/`: two engine presets, optional LiteLLM config, one-account template.
+* `config/`: two long-context engine defaults, optional throughput preset, LiteLLM config, one-account template.
 * `claim/`: parser stub, normalized claim validator, fixture placeholder, contract.
 * `watcher/`: hooks, single-account loop, SSH deployment, runtime payload, notifications,
   detached benchmark launcher, and uninstalled launchd template.
@@ -411,14 +449,18 @@ All secrets are caller-exported only. The scripts do not automatically source
 * `tests/`: claim validation, offline dry runs, native flags/binding, secret redaction,
   status history, fragmented SSE, network decisions, exact vendor hash, image
   integrity, exact relay argv, and mocked watcher push/ready/up/drain/down ordering.
-* `docs/relay-contract.md`, `docs/health-contract.md`: source-backed operational contracts.
+* `docs/live-node.md`: paste-ready blocks for an interactive SSH session.
+* `docs/relay-contract.md`, `docs/health-contract.md`, `docs/auth-contract.md`: operational contracts and source evidence.
 * `docs/model-metadata.json`: public HF metadata and per-file checksums; `docs/planning.html`: transfer/cost chart.
 * `.env.example`, `.gitignore`, `requirements-node.txt`, `Makefile`, this README.
 
 `make lint` runs shellcheck and bash -n on every shell script, including vendor,
 and py_compile on Python files. Tests use no GPU/provider/tunnel. `.venv`, logs,
-runs, archives, secret env files, and generated status are ignored. No secrets
-are stored by the kit's configuration or SSH/Docker transport. The vendor helper's raw-log/shared-path caveat is documented above; it is preserved unchanged.
+runs, archives, `node.env`, `client.env`, secret env files, and generated status
+are ignored. The node env remains a mode-600 runtime file outside the repo; the
+Docker stdin transport avoids metadata storage. Fake-key tests cover engine logs
+and teardown archives. The vendor helper's raw-log/shared-path caveat remains;
+it is preserved unchanged.
 
 ## Decisions needed before the first window
 
@@ -433,8 +475,9 @@ are stored by the kit's configuration or SSH/Docker transport. The vendor helper
   canonical `CF_TUNNEL_TOKEN` and `INFER_UPSTREAM_KEY`; retire the deprecated alias.
 * Netops confirmation of infer.belweave.tech → infer-origin.belweave.tech,
   b300-infer ingress, origin protection, SSE timeouts, replica readiness, and a
-  tested admission/drain endpoint. Relay-side pinning/expiry/port collision fixes
-  remain open; node-helper pinning/checksums/architecture are already fixed.
+  tested admission/drain endpoint. Updated relay version checks, free-port selection,
+  expiry, custom SSH ports and rsync compatibility are implemented by Netops;
+  public handoff, concurrent reservations and retry supervision need qualification.
 * Relay host/executable path, existing key paths, staged storage, and upload rate;
   offline Docker/kernel dependencies. Reverse mode needs Netops connector support.
 * Target prompt/output lengths, thinking mode, TTFT/TPOT targets, prices, billing

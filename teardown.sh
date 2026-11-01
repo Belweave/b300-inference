@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/node-env.sh
+source "$ROOT/scripts/node-env.sh"
 # shellcheck source=scripts/common.sh
 source "$ROOT/scripts/common.sh"
 if [[ $DRY_RUN == 1 ]]; then echo 'DRY RUN: collect; bounded drain; stop engine and connector; archive; optional upload'; exit 0; fi
@@ -28,7 +30,7 @@ if [[ -f $RUN_DIR/bench.pid ]]; then
     fi
 fi
 status collecting running
-nvidia-smi -q > "$RUN_DIR/nvidia-final.txt" 2>/dev/null || true
+nvidia-smi -q 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/nvidia-final.txt" || true
 python3 "$KIT_ROOT/scripts/origin_request.py" /metrics 2>/dev/null | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/metrics.txt" || true
 if [[ -f /tmp/cloudflared.log && -f $RUN_DIR/cloudflared.pid ]]; then
     python3 "$KIT_ROOT/scripts/redact.py" < /tmp/cloudflared.log > "$RUN_DIR/cloudflared.log"
@@ -74,8 +76,7 @@ status stopped ok
 # Log writers have closed after container shutdown. Never archive env files or weights.
 archive="$KIT_ROOT/runs/$RUN_ID.tar.gz"
 # Pushed image archives can be tens of GB; never package them as diagnostics.
-tar --exclude="$RUN_ID/incoming" --exclude='*.tar.zst' -czf "$archive.tmp" -C "$KIT_ROOT/runs" "$RUN_ID"
-mv "$archive.tmp" "$archive"
+python3 "$KIT_ROOT/scripts/archive.py" "$RUN_DIR" "$archive"
 if [[ -n ${ARTIFACT_S3_URI:-} ]]; then
     upload_cmd=(s5cmd)
     if [[ -n ${S3_ENDPOINT_URL:-} ]]; then upload_cmd+=(--endpoint-url "$S3_ENDPOINT_URL"); fi

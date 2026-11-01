@@ -2,10 +2,18 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
 if [[ ${1:-} == --claim ]]; then exec "$ROOT/watcher/deploy.sh" "${2:?claim JSON path required}"; fi
+# shellcheck source=scripts/node-env.sh
+source "$ROOT/scripts/node-env.sh"
 # shellcheck source=scripts/common.sh
 source "$ROOT/scripts/common.sh"
 case "$ENGINE" in sglang|vllm) ;; *) die 'ENGINE must be sglang or vllm';; esac
 set -a
+export PROFILE=${PROFILE:-longctx}
+case "$PROFILE" in
+    longctx) ;;
+    throughput) source "$KIT_ROOT/config/throughput.env" ;;
+    *) die 'PROFILE must be longctx or throughput' ;;
+esac
 # shellcheck source=/dev/null
 source "$KIT_ROOT/config/$ENGINE.env"
 set +a
@@ -24,10 +32,11 @@ DRY RUN: no probes, downloads, Docker, SSH, or tunnels executed.
 3. WEIGHTS_SOURCE=$WEIGHTS_SOURCE; IMAGE_SOURCE=$IMAGE_SOURCE.
    push: verify staged files against docs/model-metadata.json; SHA256 image archive,
    zstd -dc | docker load; verify loaded image ID. No node-side data downloads.
-4. Launch $ENGINE ($ENGINE_IMAGE), TP8, loopback 127.0.0.1:8000, env API key.
+4. Launch $ENGINE ($ENGINE_IMAGE), TP8, loopback 127.0.0.1:8000, PROFILE=$PROFILE.
+   Context $CONTEXT_LENGTH; max running $MAX_RUNNING_REQUESTS; graph max $CUDA_GRAPH_MAX_BS; SYS_NICE.
 5. GET /health without auth; /v1/models with auth (+401 without); real chat smoke.
 6. cloudflared: call unchanged Netops helper after readiness; CF_TUNNEL_TOKEN env.
-   ssh/forward: report ready; watcher calls external relay.sh up WINDOW USER@HOST KEY.
+   ssh/forward: report ready; watcher calls relay.sh up WINDOW USER@HOST --port N --key FILE --expires EPOCH.
    ssh/reverse: optional node -R transport; Netops must supply relay-side connector.
 7. T-10m: bounded drain, stop services; watcher calls relay.sh down after drain.
 PLAN
@@ -85,8 +94,11 @@ Path(os.environ['RUN_DIR'],'bootstrap-owner.json').write_text(json.dumps({'pid':
 PYOWNER
 phase preflight
 python3 - <<'PY'
-import csv,json,os,re,shutil,subprocess
+import csv,json,os,re,shutil,subprocess,sys
 from pathlib import Path
+sys.path.insert(0, os.environ['KIT_ROOT']+'/scripts')
+from redact import redact, secret_values
+secrets=secret_values()
 r=Path(os.environ['RUN_DIR'])
 rows=list(csv.reader(subprocess.check_output(['nvidia-smi','--query-gpu=name,uuid,memory.total,driver_version','--format=csv,noheader,nounits'],text=True).splitlines()))
 assert len(rows)==8 and all('B300' in x[0] for x in rows), 'Need exactly eight B300 GPUs'
@@ -94,10 +106,10 @@ assert all(int(x[3].strip().split('.')[0])>=580 for x in rows), 'Need driver >=5
 summary=subprocess.check_output(['nvidia-smi'],text=True)
 m=re.search(r'CUDA Version:\s*(\d+\.\d+)',summary)
 assert m and float(m[1])>=13, 'Driver CUDA capability must be >=13'
-(r/'gpu.json').write_text(json.dumps(rows))
-(r/'nvidia-smi.txt').write_text(summary)
+(r/'gpu.json').write_text(redact(json.dumps(rows),secrets))
+(r/'nvidia-smi.txt').write_text(redact(summary,secrets))
 topo=subprocess.check_output(['nvidia-smi','topo','-m'],text=True)
-(r/'nvlink.txt').write_text(topo)
+(r/'nvlink.txt').write_text(redact(topo,secrets))
 assert len(re.findall(r'NV\d+',topo))>=56, 'Expected all eight GPUs connected by NVLink'
 p=Path(os.environ['WEIGHTS_DIR']); p.mkdir(parents=True,exist_ok=True)
 needed=int(os.environ.get('MIN_FREE_GB','650'))*10**9
@@ -107,7 +119,7 @@ assert shutil.disk_usage(p).free >= max(20*10**9,needed-existing), 'Insufficient
 PY
 phase runtime
 need nvidia-container-cli
-nvidia-container-cli --version > "$RUN_DIR/toolkit.txt"
+nvidia-container-cli --version 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/toolkit.txt"
 docker info >/dev/null
 # Timer is armed before any large I/O. Its environment stays in memory.
 if [[ ! -f $RUN_DIR/timer.pid ]] || ! kill -0 "$(cat "$RUN_DIR/timer.pid")" 2>/dev/null; then
@@ -143,9 +155,9 @@ wait "$pull_pid"; wait "$weights_pid"
 jobs_to_stop=()
 ENGINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["effective_ref"])' "$RUN_DIR/loaded-image.json")
 export ENGINE_IMAGE
-docker image inspect "$ENGINE_IMAGE" --format '{{json .RepoDigests}}' > "$RUN_DIR/image-digests.json"
+docker image inspect "$ENGINE_IMAGE" --format '{{json .RepoDigests}}' | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/image-digests.json"
 # Runtime hardware probe is cheap and catches incompatible PyTorch wheels.
-docker run --rm --gpus all --entrypoint python3 "$ENGINE_IMAGE" -c 'import torch; assert torch.cuda.device_count()==8; assert torch.cuda.get_device_capability()==(10,3); print(torch.__version__,torch.version.cuda,torch.cuda.get_arch_list())' > "$RUN_DIR/torch.txt"
+docker run --rm --gpus all --entrypoint python3 "$ENGINE_IMAGE" -c 'import torch; assert torch.cuda.device_count()==8; assert torch.cuda.get_device_capability()==(10,3); print(torch.__version__,torch.version.cuda,torch.cuda.get_arch_list())' 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" > "$RUN_DIR/torch.txt"
 python3 - <<'PYMETA'
 import json,os,subprocess
 from pathlib import Path
@@ -157,7 +169,7 @@ PYMETA
 phase launch
 [[ ! -e $RUN_DIR/stop ]] || die 'Deadline reached'
 if ! docker inspect "$SERVER_NAME" >/dev/null 2>&1; then
-    docker create -i --name "$SERVER_NAME" --label "b300.run=$RUN_ID" --gpus all --network host --ipc host \
+    docker create -i --name "$SERVER_NAME" --label "b300.run=$RUN_ID" --gpus all --network host --ipc host --cap-add SYS_NICE \
         --log-driver none --mount "type=bind,src=$WEIGHTS_DIR,dst=/weights,readonly" \
         --mount "type=bind,src=$KIT_ROOT,dst=/kit,readonly" --entrypoint python3 "$ENGINE_IMAGE" /kit/scripts/serve.py >/dev/null
 fi
@@ -211,7 +223,7 @@ if [[ $SELECTED_NETWORK_MODE == ssh ]]; then
         : "${REVERSE_RELAY_TARGET:?required for reverse mode}"
         : "${REVERSE_RELAY_PORT:?required for reverse mode}"
         if [[ ! -f $RUN_DIR/reverse.pid ]] || ! kill -0 "$(cat "$RUN_DIR/reverse.pid")" 2>/dev/null; then
-            nohup "$KIT_ROOT/scripts/reverse-tunnel.sh" </dev/null > "$RUN_DIR/reverse.log" 2>&1 9>&- &
+            nohup "$KIT_ROOT/scripts/capture.sh" "$RUN_DIR/reverse.log" "$KIT_ROOT/scripts/reverse-tunnel.sh" </dev/null >/dev/null 2>&1 9>&- &
             echo "$!" > "$RUN_DIR/reverse.pid"
         fi
     fi

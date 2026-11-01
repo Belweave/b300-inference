@@ -19,9 +19,25 @@ ssh_args=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 -o 
 target="$user@$host"
 export NODE_SSH_PORT=$port NODE_SSH_KEY_PATH=$key
 ssh "${ssh_args[@]}" "$target" "mkdir -p $remote"
+# Copy the provisioned file opaquely. The Mac never sources or reads its contents.
+export MAC_NODE_ENV_FILE=${MAC_NODE_ENV_FILE:-$HOME/.config/b300/node.env}
+export NODE_ENV_FILE=${NODE_ENV_FILE:-node.env}
+[[ $NODE_ENV_FILE =~ ^[a-zA-Z0-9_./-]+$ && $NODE_ENV_FILE != *..* ]] || die 'NODE_ENV_FILE must be a safe absolute or home-relative path'
+node_env_destination=$NODE_ENV_FILE
+if [[ $NODE_ENV_FILE != /* ]]; then
+    # Remote SSH starts in home; node bootstrap later expands this relative path.
+    # shellcheck disable=SC2088
+    export NODE_ENV_FILE="~/$NODE_ENV_FILE"
+fi
+[[ -f $MAC_NODE_ENV_FILE ]] || die 'MAC_NODE_ENV_FILE is missing; provision node.env through Netops'
+scp -p -P "$port" -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 \
+    "$MAC_NODE_ENV_FILE" "$target:$node_env_destination"
+ssh "${ssh_args[@]}" "$target" "chmod 600 $node_env_destination"
 stage_exclude=()
 if [[ $STAGING_DIR == "$ROOT/"* ]]; then stage_exclude+=(--exclude="${STAGING_DIR#"$ROOT/"}/"); fi
-rsync -az ${stage_exclude[@]+"${stage_exclude[@]}"} -e "$ROOT/watcher/ssh-rsync.sh" --exclude='.git/' --exclude='.env*' --exclude='*.env' \
+rsync -az ${stage_exclude[@]+"${stage_exclude[@]}"} -e "$ROOT/watcher/ssh-rsync.sh" \
+    --include='/config/sglang.env' --include='/config/vllm.env' --include='/config/throughput.env' \
+    --exclude='.git/' --exclude='.env*' --exclude='*.env' \
     --exclude='runs/' --exclude='logs/' --exclude='staging/' --exclude='__pycache__/' --exclude='.venv/' --exclude='*.fixture.txt' \
     "$ROOT/" "$target:$remote/"
 mkdir -p "$RUN_DIR"
@@ -33,7 +49,6 @@ if [[ $selected == ssh ]]; then
     if [[ $WEIGHTS_SOURCE != volume ]]; then export WEIGHTS_SOURCE=push; fi
     if [[ $SSH_DIRECTION == forward ]]; then
         : "${RELAY_SH:?SSH forward mode requires external Netops relay.sh}"
-        [[ $port == 22 ]] || die 'Netops relay.sh currently requires node SSH port 22'
         if [[ -n ${RELAY_HOST:-} ]]; then : "${RELAY_NODE_SSH_KEY_PATH:?key path on remote relay required}"; fi
     else
         "$ROOT/watcher/notify.sh" milestone 'Reverse SSH selected: node transport only; Netops must provision the relay-side connector separately'
@@ -72,7 +87,7 @@ while (( $(date +%s) < WINDOW_END )); do
             if [[ $selected == ssh && $SSH_DIRECTION == forward && $relay_started == 0 ]]; then
                 # Mark before calling so a partially failed up is cleaned up by EXIT.
                 relay_started=1
-                python3 "$ROOT/watcher/relay.py" up "$RUN_ID" "$target" "$relay_key"
+                python3 "$ROOT/watcher/relay.py" up "$RUN_ID" "$target" --port "$port" --key "$relay_key" --expires "$WINDOW_END"
                 notify milestone "Relay forwarding ready for $RUN_ID"
             fi
             if [[ $bench_started == 0 && ${FIRST_WINDOW:-1} == 1 ]]; then

@@ -16,9 +16,8 @@ host/port/user/expires_at. Key paths are excluded so Mac/relay path differences
 do not change allocation identity. Retries of a claim use the same ID.
 
 The Mac must be able to SSH to the node. The relay also needs inbound SSH access
-to it. The kit's direct transport honors `port`; Netops' current helper only uses
-port 22, so the watcher rejects non-22 claims in forward mode. Node ingress is
-SSH only; no public inference ports are needed.
+to it. Both direct transport and Netops' updated helper honor the claim's SSH
+`port`. Node ingress is SSH only; no public inference ports are needed.
 
 ## Ready before up
 
@@ -47,12 +46,12 @@ per-host HTTPS probe results. Explicit SSH mode does not probe outbound HTTPS.
 For a local relay:
 
 ```text
-RELAY_SH up <window-id> <user@node-host> <node-key-path>
+RELAY_SH up <window-id> <user@node-host> --port <claim-port> --key <node-key-path> --expires <expires_at>
 RELAY_SH down <window-id>
-RELAY_SH push-weights <user@node-host> <local-weights-dir> <remote-dir> <node-key-path>
+RELAY_SH push-weights <user@node-host> <local-weights-dir> <remote-dir> --port <claim-port> --key <node-key-path>
 ```
 
-These calls match the draft's positional arguments exactly. The Mac invokes the
+These calls match Netops' updated flag interface exactly. The Mac invokes the
 external executable via argv arrays. Set `RELAY_HOST=user@relay` to dispatch the
 same argv over SSH to that host; `RELAY_SH` must be an absolute path there.
 `RELAY_SSH_KEY_PATH` optionally selects the Mac→relay identity.
@@ -65,13 +64,21 @@ helper output is not echoed by the wrapper because it may contain credentials.
 The relay itself chooses:
 
 ```text
-relay_port = 18000 + cksum(window-id) % 1000
+relay_port = first unused/unclaimed port in 18000..18999
+port_file  = <state>/<window-id>.port
 state      = ${RELAY_STATE:-$HOME/.b300-relay}
 forward    = ssh ... -L 127.0.0.1:<relay_port>:127.0.0.1:8000 <user@node-host>
 ```
 
+The wrapper records the helper's chosen port (from its success line or `.port`
+file, including on remote relays) in `runs/<window-id>/relay.status.json`, alongside
+the node SSH port and expiry. `down` marks that status stopped, retaining the port
+for diagnostics. It never predicts a port from the window ID.
+
+The relay checks cloudflared **2026.10.7**, reserves an available port in its state,
+and uses `--info=progress2` only with rsync ≥3.1 (otherwise `--progress`).
 The relay dials **into** the node, with keepalive, ExitOnForwardFailure, and the
-draft's reconnect loop. Its cloudflared points at the relay-local listener.
+helper's reconnect loop. Its cloudflared points at the relay-local listener.
 Public chain: `infer.belweave.tech` Worker → `infer-origin.belweave.tech` → named
 tunnel **b300-infer** → relay listener → node loopback. Confirm with Netops that
 named-tunnel remote ingress honors the intended per-replica local port; do not
@@ -117,10 +124,11 @@ up to `POLL_SECONDS` (20) plus command latency after engine stop. Netops should
 add health-aware removal/admission signaling for a stronger handoff guarantee.
 No replica-ready assumption is made from a process PID.
 
-Node teardown has a detached deadline timer. The relay draft has no expiry input
-or TTL watchdog: if the Mac sleeps/crashes, its relay processes can outlive the
-allocation. Netops should add a relay-local expiry watchdog and idempotent up/down.
-The kit does not release or bill the grid allocation.
+Node teardown has a detached deadline timer. The watcher passes the original
+claim expiry with `--expires`; the updated helper self-tears-down there even if
+the Mac disappears. Normal drain/down still happens at T−10m. Relay process
+supervision across SSH disconnects/reboots and idempotent retry cleanup still
+need qualification. The kit does not release or bill the grid allocation.
 
 ## Optional reverse SSH
 
@@ -143,19 +151,17 @@ Reverse readiness means transport/node ready only; public service is not automat
 Stopping the reverse transport at T−10m can interrupt streams; qualify its drain
 semantics before using it for public traffic.
 
-## Suggestions for Netops (draft unchanged)
+## Remaining Netops checks
 
-* Add node `-p`/SSH-config support; the current positional interface discards port.
-* Keep the node-ready-before-up contract; 60 seconds is too short for cold loading.
-* Detect collisions in the 1,000-port cksum namespace and allocate/reserve ports.
-* Pin/checksum and select architecture for relay-side cloudflared; the updated
-  **node** helper already does this, but the relay draft still uses PATH's binary.
-* `--info=progress2` requires rsync ≥3.1. Use Homebrew rsync on a Mac relay; do not
-  assume Apple's bundled rsync/openrsync supports the flag.
-* Add checksum/repair handling to push-weights; node verification remains mandatory.
-* Add up/down idempotency, failure rollback, PID ownership checks, expiry, and
-  reconnect-loop supervision that survives a remote SSH dispatcher exiting.
-* Replace accept-new with independently provisioned host keys where practical,
-  and quote key paths safely (the draft's shell-word expansion mishandles spaces).
-* Verify remotely managed ingress vs per-window `--url`, health-based withdrawal,
+* Keep node-ready-before-up; the helper's 60-second health wait is too short for cold loading.
+* Verify remotely managed ingress versus per-window `--url`, health-aware withdrawal,
   Worker key propagation, and public SSE behavior during replica handoff.
+* Add checksum/repair handling to push-weights; node verification remains mandatory.
+* Qualify up/down idempotency, failure rollback, PID ownership checks, and process
+  supervision across remote SSH disconnects/reboots. Sequential free-port selection
+  is implemented; simultaneous reservations still need an atomic allocation test.
+* Verify the installed relay cloudflared binary's provenance/checksum in addition
+  to the now-enforced version. The node helper already checks its download hash.
+* Replace accept-new with independently provisioned host keys where practical,
+  and quote key paths safely (the helper's shell-word expansion mishandles spaces).
+* Supply the separate reverse-mode connector before enabling reverse serving.
