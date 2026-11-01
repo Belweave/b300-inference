@@ -35,7 +35,8 @@ a gateway, acquire GPUs or release allocations. It refuses an occupied local
 port 8000. The replacement node needs eight B300s and its own allocation lifetime.
 This is preparation on a separate node; do not run it on the serving node.
 
-Key knobs: `BAKED_IMAGE`, `BASE_WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41`),
+Key knobs: `WARM_TIMEOUT_SECONDS=1200` (positive integer), `IMAGE_DIGEST`,
+`BAKED_IMAGE` (must be pinned), `BASE_WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41`),
 `WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41-uncensored`), `SHARD_WORKERS=16`,
 `HASH_WORKERS=4`, `MIN_MBPS=0` (decimal MB/s; measured over at least 10 seconds),
 `MEM_FRACTION=.85`, `CHUNKED_PREFILL_SIZE=8192`, `SCHEDULE_POLICY=lpm`,
@@ -51,6 +52,13 @@ for tools, with `--trust-remote-code` and no Jinja template. Engram defaults to 
 (203 GB per replica + 32 GB headroom), and fails closed on insufficient RAM.
 No deprecated Engram environment variable is emitted. See the
 [A/B noon runbook](ab-serve-plans.md) for flags, dry-runs and image qualification.
+
+Warm-up ends at the earlier of its start plus `WARM_TIMEOUT_SECONDS` and
+`WINDOW_END-780`. The budget includes weight acquisition, image preparation,
+both launches on a fallback to 64, health checks and prefix replay. A cold node
+that must download weights needs a larger `WARM_TIMEOUT_SECONDS` or pre-staged
+weights. Legacy bootstrap uses `HEALTH_TIMEOUT_SECONDS=1200` from its first
+launch, shared with its fallback and bounded by `WINDOW_END-600`.
 
 Bake `docker/Dockerfile.baked` before the rental, pin the result, and stage it
 locally as `BAKED_IMAGE`. A locally present baked image skips pulls; otherwise
@@ -134,10 +142,11 @@ Success atomically writes `runs/warm-<id>/ready.json` and prints one
 `b`, from the validated `TUNNEL_SLOT` environment variable). Schema stays at 1;
 the ready file and stdout line carry the same slot. Netops must independently probe the
 new origin through its route before flipping. A PID or ready file alone is not
-proof of public reachability. No ready signal is emitted after
-`WINDOW_END - 13 minutes`; failure removes any new ready file and stops only the
-new warm container. File hashes/copies can finish after the deadline, but late
-completion cannot become ready. Arrange rental expiry cleanup independently.
+proof of public reachability. No ready signal is emitted after the effective
+warm deadline; timeout records `state=failed`, `reason=timeout`, removes any new
+ready file, and stops the new warm container and relay. File hashes/copies can
+finish after the deadline, but late completion cannot become ready. Arrange
+rental expiry cleanup independently.
 
 Flip **by WINDOW_END−13 min**. JIT start recommendation is that flip deadline minus
 measured warm duration minus five minutes (equivalently old expiry minus 13 min,

@@ -24,6 +24,7 @@ class LiveUpdateTests(unittest.TestCase):
             for profile, context, running in (('longctx','409600','64'), ('throughput','32768','256')):
                 if engine == 'sglang' and profile == 'longctx': context, running = '262144', '128'
                 env = dict(os.environ, ENGINE=engine, PROFILE=profile, DRY_RUN='1')
+                if engine == 'vllm': env['ENGINE_IMAGE'] = 'vllm/vllm-openai:v0.32.0@sha256:'+'a'*64
                 for name in ('CONTEXT_LENGTH','MAX_RUNNING_REQUESTS','CUDA_GRAPH_MAX_BS','ENGINE_EXTRA_ARGS_JSON'):
                     env.pop(name, None)
                 result = subprocess.run([str(ROOT/'bootstrap.sh')], env=env, capture_output=True, text=True)

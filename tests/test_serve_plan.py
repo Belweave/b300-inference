@@ -109,7 +109,30 @@ class PlanTests(unittest.TestCase):
             self.assertTrue(actual['image_pinned'])
             self.assertEqual(actual['image_digest'],DIGEST)
             self.assertEqual(actual['image_ref'],plans.DEFAULT_IMAGE+'@'+DIGEST)
-        self.assertFalse(plans.image_reference({})['image_pinned'])
+        self.assertEqual(plans.image_reference({})['image_digest'],plans.DEFAULT_IMAGE_DIGEST)
+        self.assertFalse(plans.image_reference({'ENGINE_IMAGE':'custom:tag'})['image_pinned'])
+        self.assertFalse(plans.image_reference({'BAKED_IMAGE':'baked:tag'})['image_pinned'])
+
+    def test_config_and_plan_default_pin_agree(self):
+        result = subprocess.run(['bash', '-c',
+            'source config/sglang.env; printf "%s@%s" "$ENGINE_IMAGE" "$IMAGE_DIGEST"'],
+            cwd=ROOT, env={'PATH':os.defpath}, capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout, plans.image_reference({})['image_ref'])
+
+    def test_unpinned_escape_is_only_for_print_plan(self):
+        env = {'ENGINE_IMAGE':'custom:tag', 'TUNNEL_SLOT':'a', 'WINDOW_END':'10000'}
+        with self.assertRaisesRegex(ValueError, 'Unpinned image'):
+            plans.print_plan(env)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            plans.print_plan(dict(env, ALLOW_UNPINNED='1'))
+        self.assertFalse(json.loads(out.getvalue())['image_pinned'])
+        self.assertIn('WARNING: image is unpinned (dry run only)', err.getvalue())
+        for extra in ({}, {'ALLOW_UNPINNED':'1'}, {'ALLOW_UNPINNED':'1', 'DRY_RUN':'1'}):
+            with self.subTest(extra=extra), patch('warm.load_manifest') as load:
+                with self.assertRaisesRegex(ValueError, 'Unpinned image.*set IMAGE_DIGEST or use image@sha256:'):
+                    warm.Warm(dict(env, **extra))
+                load.assert_not_called()
 
     def test_invalid_and_conflicting_digests(self):
         for value in ['sha256:123','a'*64,'sha256:'+'A'*64,'sha512:'+'a'*64,'sha256:'+'g'*64]:
@@ -128,7 +151,8 @@ class PlanTests(unittest.TestCase):
         p = json.loads(out.getvalue())
         self.assertEqual(len(p['processes']),3)
         self.assertNotIn('fixture-only-secret',out.getvalue()+err.getvalue())
-        self.assertIn('unpinned',err.getvalue())
+        self.assertEqual(err.getvalue(),'')
+        self.assertTrue(p['image_pinned'])
         self.assertTrue(p['shell_commands_without_key'])
 
     def test_host_print_requires_explicit_ram_assumption(self):
@@ -166,8 +190,14 @@ class MeasurementTests(unittest.TestCase):
         data = measure.variant_metadata(warm_report,{'LAYOUT':'dep4x2','DSPARK':'on'})
         self.assertEqual(data['config'],warm_report['variant'])
         self.assertEqual(data['launch_plan'],warm_report['launch_plan'])
-        self.assertEqual(data['image_ref'],plans.DEFAULT_IMAGE)
-        self.assertIsNone(data['image_digest'])
+        self.assertEqual(data['image_ref'],plans.DEFAULT_IMAGE+'@'+plans.DEFAULT_IMAGE_DIGEST)
+        self.assertEqual(data['image_digest'],plans.DEFAULT_IMAGE_DIGEST)
+
+    def test_measure_refuses_unpinned_report_even_with_escape(self):
+        report = self.report()
+        report.update(plans.image_reference({'ENGINE_IMAGE':'custom:tag'}))
+        with self.assertRaisesRegex(ValueError, 'Unpinned image'):
+            measure.variant_metadata(report, {'ALLOW_UNPINNED':'1'})
 
     def test_digest_only_verification_accepts_custom_image_repository(self):
         report = self.report()
@@ -226,6 +256,56 @@ class MeasurementTests(unittest.TestCase):
                     measure.main(['--warm-report',str(source),'--log',str(root/'absent.log'),
                                   '--output',str(root/'measure')])
                 sweep.assert_not_called()
+
+
+class BootstrapImageTests(unittest.TestCase):
+    def dry_run(self, script='bootstrap.sh', **env):
+        return subprocess.run([str(ROOT/script)], cwd=ROOT,
+                              env={'PATH':os.defpath, 'DRY_RUN':'1',
+                                   'NODE_ENV_FILE':str(ROOT/'tests/absent-node.env'), **env},
+                              capture_output=True, text=True)
+
+    def test_legacy_bootstrap_and_prestage_use_same_default_pin(self):
+        ref = plans.DEFAULT_IMAGE+'@'+plans.DEFAULT_IMAGE_DIGEST
+        for script in ('bootstrap.sh', 'scripts/prestage.sh'):
+            with self.subTest(script=script):
+                result = self.dry_run(script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(ref, result.stdout)
+
+    def test_embedded_pin_is_preserved_for_sglang_and_vllm(self):
+        for engine in ('sglang', 'vllm'):
+            ref = 'custom:tag@'+DIGEST
+            result = self.dry_run(ENGINE=engine, ENGINE_IMAGE=ref)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(ref, result.stdout)
+
+    def test_unpinned_legacy_launch_fails_even_with_escape(self):
+        for engine, image in [('sglang', 'custom:tag'), ('vllm', 'vllm/vllm-openai:v0.32.0')]:
+            with self.subTest(engine=engine):
+                result = self.dry_run(ENGINE=engine, ENGINE_IMAGE=image)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Unpinned image', result.stderr)
+                result = self.dry_run(ENGINE=engine, ENGINE_IMAGE=image, ALLOW_UNPINNED='1')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('WARNING: image is unpinned', result.stderr)
+                result = self.dry_run(ENGINE=engine, ENGINE_IMAGE=image, ALLOW_UNPINNED='1',
+                                      DRY_RUN='0', NODE_ENV_FILE=str(ROOT/'tests/absent-node.env'))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Unpinned image', result.stderr)
+
+    def test_explicit_digest_still_dispatches_to_warm(self):
+        result = self.dry_run(IMAGE_DIGEST=DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['image_digest'], DIGEST)
+
+    def test_shell_pin_rejects_explicit_conflict(self):
+        script = 'source scripts/common.sh; source config/sglang.env; pin_engine_image'
+        result = subprocess.run(['bash', '-c', script], cwd=ROOT, capture_output=True, text=True,
+                                env={'PATH':os.defpath, 'ENGINE_IMAGE':'custom:tag@'+DIGEST,
+                                     'IMAGE_DIGEST':plans.DEFAULT_IMAGE_DIGEST})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Conflicting image digests', result.stderr)
 
 
 class LifecycleTests(unittest.TestCase):

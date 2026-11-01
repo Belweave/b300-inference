@@ -8,6 +8,7 @@ set -a
 # shellcheck source=/dev/null
 source "$ROOT/config/$ENGINE.env"
 set +a
+pin_engine_image
 export WEIGHTS_DIR="$STAGING_DIR/$MODEL_VARIANT/weights" WEIGHTS_SOURCE=hf HF_XET_HIGH_PERFORMANCE=1
 if [[ $DRY_RUN == 1 ]]; then
     cat <<PLAN

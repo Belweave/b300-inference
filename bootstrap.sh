@@ -25,6 +25,7 @@ esac
 # shellcheck source=/dev/null
 source "$KIT_ROOT/config/$ENGINE.env"
 set +a
+pin_engine_image
 [[ $PARALLELISM == tp || $PARALLELISM == dp_ep ]] || die 'Invalid PARALLELISM'
 [[ $SPECULATION == none || $SPECULATION == dspark ]] || die 'Invalid SPECULATION'
 case "$NETWORK_MODE" in auto|cloudflared|ssh) ;; *) die 'Invalid NETWORK_MODE';; esac
@@ -86,6 +87,9 @@ jobs_to_stop=()
 failed() {
     trap - ERR TERM INT
     set +e
+    if [[ ${1:-} == timeout ]] || (( $(date +%s) >= WINDOW_END-600 )); then
+        printf '%s\n' '{"reason":"timeout"}' > "$RUN_DIR/failure.json"
+    fi
     status "${PHASE:-bootstrap}" error
     local pid
     for pid in "${jobs_to_stop[@]}"; do kill -- "-$pid" 2>/dev/null; done
@@ -191,7 +195,8 @@ if [[ $SSE_RELAY == 1 ]]; then
     fi
 fi
 launch_engine() {
-    [[ ! -e $RUN_DIR/stop ]] || die 'Deadline reached'
+    check_health_deadline
+    [[ ! -e $RUN_DIR/stop ]] || failed
     if ! docker inspect "$SERVER_NAME" >/dev/null 2>&1; then
         docker create -i --name "$SERVER_NAME" --label "b300.run=$RUN_ID" --gpus all --network host --ipc host --cap-add SYS_NICE \
             --log-driver none --mount "type=bind,src=$WEIGHTS_DIR,dst=/weights,readonly" \
@@ -201,12 +206,22 @@ launch_engine() {
         ( python3 "$KIT_ROOT/scripts/payload.py" engine | docker start -ai "$SERVER_NAME" 2>&1 | python3 "$KIT_ROOT/scripts/redact.py" >> "$RUN_DIR/engine.log" ) 9>&- &
     fi
 }
+check_health_deadline() {
+    if (( $(date +%s) >= health_end )); then
+        log 'Health deadline exceeded' >&2
+        failed timeout
+    fi
+}
 # Returns 1 when the engine container exited before health (e.g. KV or CUDA-graph OOM).
 wait_health() {
-    local health_end container_state
-    health_end=$(($(date +%s) + ${HEALTH_TIMEOUT_SECONDS:-2400}))
-    while ! python3 "$KIT_ROOT/scripts/origin_request.py" /health 2>/dev/null >/dev/null; do
-        (( $(date +%s) < health_end && $(date +%s) < WINDOW_END-600 )) || die 'Health deadline exceeded'
+    local container_state
+    while true; do
+        check_health_deadline
+        if python3 "$KIT_ROOT/scripts/origin_request.py" /health 2>/dev/null >/dev/null; then
+            check_health_deadline
+            return 0
+        fi
+        check_health_deadline
         container_state=$(docker inspect -f '{{.State.Status}}' "$SERVER_NAME")
         [[ $container_state != exited && $container_state != dead ]] || return 1
         sleep 5
@@ -214,12 +229,15 @@ wait_health() {
 }
 # Act on scripts/fit.py (decision: warm_logic.concurrency_fit). One relaunch at 64 at most.
 launch_with_fit_fallback() {
-    local started=1 fallback
+    local started=1 fallback health_end
+    health_end=$(python3 -c 'import sys,time; print(min(int(time.time())+int(sys.argv[1]), int(sys.argv[2])-600))' \
+        "${HEALTH_TIMEOUT_SECONDS:-1200}" "$WINDOW_END")
     phase launch
     launch_engine
     phase health
     wait_health || started=0
     fallback=$(python3 "$KIT_ROOT/scripts/fit.py" "$RUN_DIR/engine.log" "$started" "$RUN_DIR/fit.json")
+    check_health_deadline
     [[ -n $fallback ]] || { (( started )) || die 'Engine exited; inspect engine.log'; return 0; }
     log "FIT FALLBACK: MAX_RUNNING_REQUESTS $MAX_RUNNING_REQUESTS -> $fallback; reason in $RUN_DIR/fit.json. Flag Kai before traffic."
     docker rm -f "$SERVER_NAME" >/dev/null
@@ -229,6 +247,7 @@ launch_with_fit_fallback() {
     launch_engine
     wait_health || die 'Engine exited at fallback concurrency; inspect engine.log'
     python3 "$KIT_ROOT/scripts/fit.py" "$RUN_DIR/engine.log" 1 "$RUN_DIR/fit.json" --after-fallback >/dev/null
+    check_health_deadline
 }
 launch_with_fit_fallback
 python3 "$KIT_ROOT/scripts/readiness.py"

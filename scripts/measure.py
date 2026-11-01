@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 import time
 
@@ -15,7 +14,7 @@ import bench
 from warm_download import load_manifest
 from warm_logic import parse_pool, pool_table, recommend_running
 from warm_network import probe
-from serve_plan import add_arguments, argument_env, print_plan, variant, image_reference
+from serve_plan import add_arguments, argument_env, print_plan, variant, image_reference, require_pinned
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,8 +60,7 @@ def variant_metadata(warm, requested):
         else:
             matches = wanted['image_digest'] == warm['image_digest']
         if not matches: raise ValueError('Requested image does not match warm report')
-    if not warm['image_pinned']:
-        print('WARNING: measurement image is unpinned: '+warm['image_ref'], file=sys.stderr)
+    require_pinned(warm)
     return {'config': actual, 'launch_plan': warm['launch_plan'],
             **{k: warm[k] for k in ('image_ref', 'image_digest', 'image_tag', 'image_pinned')}}
 

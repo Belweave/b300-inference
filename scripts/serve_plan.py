@@ -9,6 +9,8 @@ from warm_logic import ram_gate
 
 LAYOUTS = {'tp8': (8, 1), 'dep4x2': (4, 2), 'dep8x1': (8, 1), 'dep2x4': (2, 4)}
 DEFAULT_IMAGE = 'lmsysorg/sglang:dev-dsv41'
+# Tag's linux/amd64 manifest as of 2026-11-01; not yet qualified on B300.
+DEFAULT_IMAGE_DIGEST = 'sha256:c1633485e2ef3a8562fc93b2e3b686abb31c4499300bf5ce13ee5d491b65c386'
 
 
 RELAY_PORT = 8000  # tunnel ingress and every local client; fixed contract
@@ -46,11 +48,18 @@ def image_reference(env):
         if digest and digest != embedded: raise ValueError('Conflicting image digests')
         digest = embedded
         if not digest: raise ValueError('Empty image digest')
+    elif ref == DEFAULT_IMAGE and not digest:
+        digest = DEFAULT_IMAGE_DIGEST
     if digest and not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
         raise ValueError('IMAGE_DIGEST must be sha256: followed by 64 lowercase hex digits')
     resolved = ref+'@'+digest if digest else ref
     return {'image_ref': resolved, 'image_digest': digest or None,
             'image_tag': ref, 'image_pinned': bool(digest)}
+
+
+def require_pinned(image):
+    if not image['image_pinned']:
+        raise ValueError('Unpinned image '+image['image_ref']+'; set IMAGE_DIGEST or use image@sha256:')
 
 
 def host_gate(env, available):
@@ -125,7 +134,10 @@ def print_plan(env, available_gb=None):
     gate = host_gate(env, available)
     selected = settings(data, env, gate)
     image = image_reference(env)
-    if not image['image_pinned']: print('WARNING: image is unpinned: '+image['image_ref'], file=sys.stderr)
+    if not image['image_pinned'] and env.get('ALLOW_UNPINNED') == '1':
+        print('WARNING: image is unpinned (dry run only): '+image['image_ref'], file=sys.stderr)
+    else:
+        require_pinned(image)
     plan = build_plan(selected, image['image_ref'], 'belweave-plan',
                       env.get('WEIGHTS_DIR', '/mnt/nvme/models/dsv41-uncensored'), Path(__file__).resolve().parents[1])
     plan.update(image, config=selected, model=data['model'], ram_assumption=gate)
