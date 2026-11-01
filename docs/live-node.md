@@ -1,5 +1,8 @@
 # Live B300 launch
 
+For the November 1 uncensored-model experiment, use the [A/B noon runbook](ab-serve-plans.md).
+The recipe below documents the earlier live server, not the new A/B defaults.
+
 Default: the finalized max-TPS configuration run on 8× B300 with TP8.
 The commands below are operator instructions, not an automatic deployment.
 The server binds `0.0.0.0:8000` inside the container; the published host port is

@@ -229,7 +229,7 @@ class TunnelSlotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch('warm.ROOT',Path(folder)), \
              patch.dict(os.environ, {}, clear=True), patch.object(warm.Warm,'run_all') as run:
             output = io.StringIO()
-            with redirect_stderr(output): result = warm.main()
+            with redirect_stderr(output): result = warm.main([])
             self.assertEqual(result,1)
             self.assertIn("TUNNEL_SLOT is required and must be exactly 'a' or 'b'", output.getvalue())
             self.assertNotIn('Traceback', output.getvalue())

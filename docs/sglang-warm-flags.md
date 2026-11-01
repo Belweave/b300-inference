@@ -32,12 +32,9 @@ Model-card requirements, retained per Kai's correction:
 - `--trust-remote-code`, `--reasoning-parser deepseek-v41` and
   `--tool-call-parser deepseekv41`: [pinned model card, lines 279–287](https://huggingface.co/dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/blob/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/README.md#L279).
   Exact parser choices are checked by the installed image, without substituting `auto`.
-- `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1`: same card, line 284. Set only if
-  `MemAvailable >= table + headroom` (203 decimal GB + 32 GB by default),
-  refreshed after downloads. Otherwise explicitly set `0` and log why. The
-  inspected newer upstream environment registry does not confirm this variable;
-  it is retained for the card's preview build, and its effect needs on-node
-  qualification. We do not silently substitute `--engram-config`.
+- Engram now uses `--engram-config` with explicit GPU/CPU placement, replacing
+  the model card's deprecated environment variable. Host mode fails closed
+  rather than changing the selected variant. See the November 1 evidence below.
 - Eight B300s use TP8/EP8, with DP attention as an alternative. The starting
   context is 262144 (warm range 250000–400000), memory fraction .85, running
   requests 64 and graphs through 64. Running requests remain a knob: noon
@@ -63,3 +60,30 @@ this path: Hub 1.x removed hf_transfer. Warm-up deliberately uses streaming HTTP
 with 16 parallel shards (configurable 1–48), to observe speed, verify while writing,
 and switch a failed/slow shard to the mirror. No misleading hf_transfer claim is
 made. The legacy bootstrap/prestage path continues using HF Xet.
+
+## November 1 A/B additions
+
+The new options were checked against upstream commit
+`c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0`, retrieved November 1, 2026.
+This is source evidence, not proof that a moving `dev-dsv41` tag contains it.
+The A/B renderer lives in `scripts/serve_plan.py`; engine options are centralized
+in `scripts/engine.py`. Warm checks the installed engine and router help and
+argument parsers before creating any GPU process. Engram's JSON is additionally
+validated with the installed `EngramConfig.from_dict`. Runtime compatibility
+and memory fit are checked by load/readiness, not inferred from argument parsing.
+
+| Option / behavior | Pinned primary source |
+|---|---|
+| `--tp-size`, `--ep-size`, `--attn-dp-size`, `--enable-dp-lm-head`, `--dist-init-addr` | [parallel fields](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/python/sglang/srt/arg_groups/fields/parallel.py) |
+| Native replicas versus attention DP; old DP-attention flags deprecated | [DP/DPA guide](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/docs/docs/advanced_features/dp_dpa_smg_guide.mdx) |
+| `--engram-config`: `placement` is exactly `gpu` or `cpu`, default replication `none`, lookup `auto` | [EngramConfig schema](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/python/sglang/srt/arg_groups/engram_config.py), [JSON CLI parsing](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/python/sglang/srt/arg_groups/fields/exec_.py#L1134), [Engram guide](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/docs/docs/advanced_features/engram.mdx) |
+| DSpark `--speculative-algorithm DSPARK --speculative-dspark-block-size 5` | [V4.1 cookbook, section 3.3](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx) |
+| Router module; worker URLs, host/port, policy `cache_aware`, `--dp-aware`, `--api-key`, `--prometheus-host` | [launch_router](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/sgl-model-gateway/bindings/python/src/sglang_router/launch_router.py), [RouterArgs](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/sgl-model-gateway/bindings/python/src/sglang_router/router_args.py) |
+| Router API-key middleware on inference routes, public health; `/v1/models` GET forwards client auth to worker | [server routes](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/sgl-model-gateway/src/server.rs), [HTTP proxy](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/sgl-model-gateway/src/routers/http/router.rs#L92) |
+| Why cache-aware rather than shared-key hashing: consistent hashing falls back to Authorization when no session routing key is supplied | [consistent hashing policy](https://github.com/sgl-project/sglang/blob/c757c4bb7c55d1eb69fdb2bdc6e6fb8507acb7a0/sgl-model-gateway/src/policies/consistent_hashing.rs#L136) |
+
+The host RAM floor is multiplied by independent replica count; no cross-process
+table sharing is assumed. TP8 remains one engine. DEP layouts use a single
+loopback router on the existing tunnel target port, without changing tunnel,
+mirror authentication or ready-signal contracts. See the [noon runbook](ab-serve-plans.md)
+for the exact commands and remaining on-image checks.

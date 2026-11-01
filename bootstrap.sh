@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
+# A/B launches use warm's existing-key, node-only contract.
+case "${1:-}" in
+    --layout|--engram|--dspark|--image|--image-digest|--print-plan|--dry-run)
+        exec "$ROOT/scripts/warm.sh" "$@" ;;
+esac
+if [[ -n ${LAYOUT:-}${ENGRAM:-}${DSPARK:-}${IMAGE_DIGEST:-} ]]; then
+    exec "$ROOT/scripts/warm.sh" "$@"
+fi
 if [[ ${1:-} == --claim ]]; then exec "$ROOT/watcher/deploy.sh" "${2:?claim JSON path required}"; fi
 # shellcheck source=scripts/node-env.sh
 source "$ROOT/scripts/node-env.sh"

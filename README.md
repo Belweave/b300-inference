@@ -177,6 +177,8 @@ verification and partial reuse. The original checkpoint remains available with
 For the new node-only preparation path, read [warm cut-over](docs/cutover.md) and
 [confirmed/dropped flags](docs/sglang-warm-flags.md). `scripts/warm.sh` prepares a
 replacement, writes a deadline-gated ready signal and never flips the gateway.
+The [noon A/B runbook](docs/ab-serve-plans.md) covers `--layout tp8|dep4x2|dep8x1|dep2x4`,
+`--engram gpu|host`, `--dspark off|on`, image digest pinning and offline `--print-plan`.
 `scripts/measure.py` measures the running local engine. Neither has been run on
 B300 for this change. The architecture details below describe the base checkpoint
 shared by the derived build; they are not new throughput measurements.

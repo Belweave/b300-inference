@@ -103,10 +103,11 @@ class WarmLogicTests(unittest.TestCase):
         data=download.load_manifest()
         with self.assertRaisesRegex(ValueError,'mtp dropped'):settings(data,{'SPEC_DECODE':'mtp'},logic.ram_gate(0))
         config=settings(data,{},logic.ram_gate(0))
-        self.assertEqual(config['SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE'],'0')
+        self.assertNotIn('SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE',config)
+        self.assertEqual(config['ENGRAM'],'gpu')
         self.assertEqual(config['CONTEXT_LENGTH'],'262144')
         args=subprocess.check_output([sys.executable,str(ROOT/'scripts/engine.py')],env={**os.environ,**config}).decode().split('\0')
-        self.assertNotIn('--engram-config',args)
+        self.assertIn('--engram-config',args)
         self.assertIn('--enable-cache-report',args)
         self.assertIn('--cuda-graph-bs-decode',args)
         self.assertNotIn('--speculative-algorithm',args)
@@ -117,9 +118,9 @@ class WarmLogicTests(unittest.TestCase):
         with self.assertRaises(ValueError):settings(data,{'WARM_GRAPH_BS':'1,128'},logic.ram_gate(0))
         for context in ('249999','400001'):
             with self.assertRaises(ValueError):settings(data,{'CONTEXT_LENGTH':context},logic.ram_gate(0))
-        high=settings(data,{'ATTN_MODE':'dp_ep'},logic.ram_gate(300_000_000_000))
+        high=settings(data,{'ATTN_MODE':'dp_ep','ENGRAM':'host'},logic.ram_gate(300_000_000_000))
         self.assertEqual(high['PARALLELISM'],'dp_ep')
-        self.assertEqual(high['SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE'],'1')
+        self.assertEqual(high['ENGRAM'],'host')
         self.assertEqual(settings(data,{'MAX_RUNNING_REQUESTS':'6'},logic.ram_gate(0))['WARM_GRAPH_BS'],'1,2,4')
 
     def test_default_model_is_pinned_uncensored(self):
