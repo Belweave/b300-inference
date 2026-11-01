@@ -2,6 +2,12 @@
 import time
 import urllib.request
 from urllib.parse import urlparse
+from mirror_auth import parse_mirror_auth
+
+
+class NoMirrorRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def public_url(url):
@@ -11,11 +17,15 @@ def public_url(url):
     return url
 
 
-def speed(url):
+def speed(url, auth=None):
     start = time.monotonic()
     try:
-        req = urllib.request.Request(public_url(url), headers={'Range':'bytes=0-8388607'})
-        with urllib.request.urlopen(req, timeout=15) as response:
+        headers = {'Range':'bytes=0-8388607'}
+        if auth is not None: headers.update(auth.headers())
+        req = urllib.request.Request(public_url(url), headers=headers)
+        open_request = (urllib.request.build_opener(NoMirrorRedirect()).open
+                        if auth is not None else urllib.request.urlopen)
+        with open_request(req, timeout=15) as response:
             body = response.read(8*1024*1024)
         elapsed = max(.001,time.monotonic()-start)
         return {'ok':True, 'bytes':len(body), 'seconds':elapsed, 'MBps':len(body)/elapsed/1e6,
@@ -24,7 +34,8 @@ def speed(url):
         return {'ok':False, 'error':type(exc).__name__}
 
 
-def probe(manifest, mirror=None, test_object='speed-test.bin'):
+def probe(manifest, mirror=None, test_object='speed-test.bin', mirror_auth_header=None):
+    auth = parse_mirror_auth(mirror_auth_header)
     result = {}
     try:
         with urllib.request.urlopen('https://cloudflare.com/cdn-cgi/trace',timeout=10) as response:
@@ -38,5 +49,5 @@ def probe(manifest, mirror=None, test_object='speed-test.bin'):
     if mirror:
         if '..' in test_object.split('/') or test_object.startswith('/'):
             raise ValueError('Mirror test object must be a relative path')
-        result['mirror'] = speed(public_url(mirror.rstrip('/'))+'/'+test_object)
+        result['mirror'] = speed(public_url(mirror.rstrip('/'))+'/'+test_object, auth=auth)
     return result

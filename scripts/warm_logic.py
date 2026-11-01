@@ -3,6 +3,13 @@ import math
 import re
 
 
+def tunnel_slot(env):
+    slot = env.get('TUNNEL_SLOT')
+    if slot not in ('a', 'b'):
+        raise ValueError("TUNNEL_SLOT is required and must be exactly 'a' or 'b'")
+    return slot
+
+
 def shard_plan(manifest):
     changed = set(manifest['differs_from_base'])
     shards = {p: f for p, f in manifest['files'].items() if p.endswith('.safetensors')}

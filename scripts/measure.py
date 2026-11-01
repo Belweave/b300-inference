@@ -124,7 +124,7 @@ def main():
             'config':{'attn_mode':'dp_ep' if config['PARALLELISM']=='dp_ep' else 'tp8','spec_decode':'off'},
             'workload':{'prompt_repeats':int(e.get('PROMPT_REPEATS','64')),'output_tokens':int(e.get('OUTPUT_TOKENS','256')),'fixed_operator_prompt':True},
             'pool':pool,'pool_table':pool_table(pool),'recommendation':recommend_running(pool,int(config['CONTEXT_LENGTH'])),
-            'network':probe(manifest,e.get('MIRROR_URL'),e.get('MIRROR_TEST_OBJECT','speed-test.bin')),
+            'network':probe(manifest,e.get('MIRROR_URL'),e.get('MIRROR_TEST_OBJECT','speed-test.bin'),e.get('MIRROR_AUTH_HEADER')),
             'results':asyncio.run(sweep())}
     args.output.with_suffix('.json').write_text(json.dumps(report,indent=2)+'\n')
     summary=markdown(report);args.output.with_suffix('.md').write_text(summary);print(summary)
