@@ -1,9 +1,11 @@
 PYTHON ?= $(if $(wildcard .venv/bin/python3),.venv/bin/python3,python3)
-.PHONY: lint test dry-run
+.PHONY: lint test dry-run alert-test
 lint:
 	./scripts/lint.sh
 test:
 	$(PYTHON) -m unittest discover -s tests -v
+alert-test:
+	node --test alert-receiver/test
 dry-run:
 	DRY_RUN=1 NETWORK_MODE=ssh WEIGHTS_SOURCE=push ./bootstrap.sh
 	DRY_RUN=1 NETWORK_MODE=auto ./bootstrap.sh

@@ -1,0 +1,24 @@
+# Draft only. Deployment needs Preetham's approval.
+name = "b300-safety-alert"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+[vars]
+NOTIFY_API_ORIGIN = "https://notify.belweave.ai"
+REPLAY_WINDOW_S = "300"
+MAX_ATTEMPTS = "12"
+
+[[durable_objects.bindings]]
+name = "LEDGER"
+class_name = "AlertLedger"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AlertLedger"]
+
+# Secrets only; never put their values here:
+# NOTIFY_WEBHOOK_SECRET
+# NOTIFY_API_TOKEN
+# NOTIFY_DEVICE_ID (optional)
+# Netops must choose the route/hostname before deployment.
