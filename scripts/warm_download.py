@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import aiohttp
 from warm_logic import verify_mirror, fallback
+from mirror_auth import parse_mirror_auth, mirror_request
 
 MANIFEST = Path(__file__).resolve().parents[1]/'config/manifests/uncensored-c19ca5c.json'
 
@@ -99,33 +100,39 @@ def write_block(stream, digest, block):
     digest.update(block)
 
 
-async def fetch(session, url, target, f, floor, end):
+async def fetch(session, url, target, f, floor, end, *, mirror=False, auth=None):
     tmp = target.with_name(target.name+'.incomplete'); target.parent.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic(); count = 0
+    started = time.monotonic()
     h = hashlib.sha256()
-    try:
-        timeout = aiohttp.ClientTimeout(total=max(0.01, end-time.time()), sock_read=30)
-        async with session.get(url, timeout=timeout) as response:
-            response.raise_for_status()
-            with tmp.open('wb') as stream:
-                async for block in response.content.iter_chunked(1024*1024):
-                    count += len(block)
-                    if count > f['size']: raise ValueError('Oversized download')
-                    await asyncio.to_thread(write_block, stream, h, block)
-                    elapsed = time.monotonic()-started
-                    if elapsed >= 10 and fallback(mbps=count/elapsed/1e6, floor=floor):
-                        raise ValueError('Download below speed floor')
+    async def consume(response):
+        response.raise_for_status()
+        count = 0
+        with tmp.open('wb') as stream:
+            async for block in response.content.iter_chunked(1024*1024):
+                count += len(block)
+                if count > f['size']: raise ValueError('Oversized download')
+                await asyncio.to_thread(write_block, stream, h, block)
+                elapsed = time.monotonic()-started
+                if elapsed >= 10 and fallback(mbps=count/elapsed/1e6, floor=floor):
+                    raise ValueError('Download below speed floor')
         elapsed = max(time.monotonic()-started, 0.001)
         valid = count == f['size'] and h.hexdigest() == f['sha256']
         if fallback(valid=valid, mbps=count/elapsed/1e6 if elapsed >= 10 else None, floor=floor):
             raise ValueError('Download checksum/size/speed failed')
         tmp.replace(target)
         return {'bytes': count, 'seconds': elapsed, 'MBps': count/elapsed/1e6}
+    try:
+        timeout = aiohttp.ClientTimeout(total=max(0.01, end-time.time()), sock_read=30)
+        if mirror:
+            return await mirror_request(session, url, auth, consume, timeout=timeout)
+        async with session.get(url, timeout=timeout) as response:
+            return await consume(response)
     finally:
         tmp.unlink(missing_ok=True)
 
 
 async def acquire(data, root, base, end, env):
+    auth = parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
     root, base = Path(root), Path(base)
     if root.resolve() == base.resolve(): raise ValueError('Target must be separate from base')
     root.mkdir(parents=True, exist_ok=True)
@@ -144,9 +151,10 @@ async def acquire(data, root, base, end, env):
     os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=workers), trust_env=False) as session:
         if mirror:
-            async with session.get(mirror+'/'+revision+'/manifest.json', timeout=aiohttp.ClientTimeout(total=min(30,max(.01,end-time.time())))) as response:
-                response.raise_for_status()
-                mirror_files = verify_mirror(data, await response.json())
+            async def consume_manifest(response):
+                return verify_mirror(data, await response.json())
+            mirror_files = await mirror_request(session, mirror+'/'+revision+'/manifest.json', auth, consume_manifest,
+                                               timeout=aiohttp.ClientTimeout(total=min(30,max(.01,end-time.time()))))
         async def check(path, f):
             async with hashes:
                 return await asyncio.to_thread(verified, path, f, cache, env.get('FORCE_HASH') == '1')
@@ -175,7 +183,7 @@ async def acquire(data, root, base, end, env):
                     source = 'hf'
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                     if name not in mirror_files: raise
-                    stats = await fetch(session, mirror+'/'+revision+'/'+quote(name), target, f, 0, end)
+                    stats = await fetch(session, mirror+'/'+revision+'/'+quote(name), target, f, 0, end, mirror=True, auth=auth)
                     source = 'mirror'
                 remember(target, f, cache)
                 records.append({'file':name, 'source':source, **stats})
