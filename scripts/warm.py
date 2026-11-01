@@ -12,13 +12,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 
 from warm_download import load_manifest, acquire
 from warm_logic import (deadline, jit_start, tunnel_slot, graph_sizes, parse_pool,
                         concurrency_fit, fallback_settings, FALLBACK_RUNNING)
-from serve_plan import (front_port, RELAY_PORT, variant, image_reference, host_gate, require_host_ram, build_plan,
+from serve_plan import (front_port, RELAY_PORT, variant, image_reference, require_pinned, host_gate, require_host_ram, build_plan,
                         add_arguments, argument_env, print_plan)
 from mirror_auth import parse_mirror_auth
 from warm_network import probe, public_url
@@ -64,19 +65,29 @@ def settings(data, env, ram):
 
 class Warm:
     def __init__(self, env):
+        started = time.time()
         # Validate operator-exported values before filesystem/network/GPU work.
+        timeout = str(env.get('WARM_TIMEOUT_SECONDS', '1200'))
+        if not re.fullmatch(r'[0-9]+', timeout) or int(timeout) <= 0:
+            raise ValueError('WARM_TIMEOUT_SECONDS must be a positive integer')
+        timeout = int(timeout)
         self.tunnel_slot = tunnel_slot(env)
         parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
         variant(env)
         self.image_meta = image_reference(env)
+        require_pinned(self.image_meta)
         self.env = env
         self.data = load_manifest()
-        self.end = deadline(int(env['WINDOW_END']))
+        window_end = deadline(int(env['WINDOW_END']))
+        self.end = min(window_end, started + timeout)
+        self.deadline_bound = ('WINDOW_END minus 13 minutes' if window_end <= started + timeout
+                               else f'WARM_TIMEOUT_SECONDS={timeout}')
         self.id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex[:8]
         self.run = ROOT/'runs'/('warm-'+self.id); self.run.mkdir(parents=True)
         self.path = self.run.with_suffix('.json')
         self.ready = self.run/'ready.json'
-        self.record = {'model':self.data['model'], 'started_epoch':time.time(), 'deadline_epoch':self.end,
+        self.record = {'model':self.data['model'], 'started_epoch':started, 'deadline_epoch':self.end,
+                       'warm_timeout_seconds':timeout,
                        'stages':{}, 'state':'warming', 'tunnel_slot':self.tunnel_slot}
         self.lock = threading.RLock()
         self.name = 'b300-warm-'+self.id.lower()
@@ -91,14 +102,22 @@ class Warm:
 
     def remaining(self):
         value = self.end-time.time()
-        if value <= 0: raise TimeoutError('Old-node WINDOW_END minus 13 minutes has passed')
+        if value <= 0: raise TimeoutError('Warm deadline reached: '+self.deadline_bound)
         return value
+
+    def timed_out(self, exc):
+        if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+            return True
+        return (isinstance(exc, urllib.error.URLError) and time.time() >= self.end
+                and (isinstance(exc.reason, TimeoutError) or exc.reason == 'timed out'))
 
     def stage(self, name, fn):
         with self.lock:
             self.record['stages'][name] = {'start_epoch':time.time()}; self.save()
         try:
+            self.remaining()
             result = fn()
+            self.remaining()
             with self.lock: self.record['stages'][name]['ok'] = True
             return result
         except Exception as exc:
@@ -121,8 +140,7 @@ class Warm:
 
     def image(self):
         image = self.image_meta['image_ref']
-        if not self.image_meta['image_pinned']:
-            print('WARNING: image is unpinned: '+image, file=sys.stderr)
+        require_pinned(self.image_meta)
         with self.lock:
             self.record.update(self.image_meta); self.save()
         local = subprocess.run(['docker','image','inspect',image],stdout=subprocess.DEVNULL,
@@ -177,16 +195,17 @@ class Warm:
                'SSE_HEARTBEAT_SECONDS': self.env.get('SSE_HEARTBEAT_SECONDS', '15')}
         proc = subprocess.Popen([sys.executable, str(ROOT/'scripts/sse_relay.py')], env=env, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        self.relay = proc
         import socket
         for _ in range(100):
+            self.remaining()
             if proc.poll() is not None: raise RuntimeError('SSE relay exited; see relay.log')
             try:
-                socket.create_connection(('127.0.0.1', RELAY_PORT), timeout=1).close(); break
+                socket.create_connection(('127.0.0.1', RELAY_PORT), timeout=min(1,self.remaining())).close(); break
             except OSError:
-                time.sleep(0.1)
+                time.sleep(min(0.1,self.remaining()))
         else:
             raise RuntimeError('SSE relay did not open port 8000')
-        self.relay = proc
         with self.lock:
             self.record['sse_relay'] = {'pid': proc.pid, 'port': RELAY_PORT, 'engine_port': int(selected['ENGINE_PORT']),
                                         'heartbeat_seconds': float(env['SSE_HEARTBEAT_SECONDS'])}
@@ -223,8 +242,9 @@ class Warm:
         self.record['variant'] = plan['variant']
         self.record['argv_without_key'] = plan['processes'][0]['argv_without_key']
         self.save()
-        self.command(plan['docker_create'])
+        # A timed-out create may still have allocated the container.
         self.created=True
+        self.command(plan['docker_create'])
         self.record['container']=self.name
         with (self.run/'engine.log').open('ab') as log:
             redactor=subprocess.Popen([sys.executable,str(ROOT/'scripts/redact.py')],stdin=subprocess.PIPE,
@@ -393,13 +413,18 @@ def main(argv=None):
         try:
             warm.run_all()
         except BaseException as exc:
-            warm.record.update(state='failed',error=type(exc).__name__,end_epoch=time.time());warm.save()
+            reason = 'timeout' if warm.timed_out(exc) else 'error'
+            warm.record.update(state='failed',reason=reason,error=type(exc).__name__,end_epoch=time.time());warm.save()
             warm.ready.unlink(missing_ok=True)
             if warm.created:
-                subprocess.run(['docker','rm','-f',warm.name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+                try:
+                    subprocess.run(['docker','rm','-f',warm.name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+                except (OSError, subprocess.SubprocessError):
+                    pass
             if warm.relay is not None and warm.relay.poll() is None:
                 warm.relay.terminate()
-            print('WARM FAILED: '+type(exc).__name__+'; inspect '+str(warm.path),file=sys.stderr)
+            failure = 'timeout' if reason == 'timeout' else type(exc).__name__
+            print('WARM FAILED: '+failure+'; inspect '+str(warm.path),file=sys.stderr)
             return 1
     return 0
 

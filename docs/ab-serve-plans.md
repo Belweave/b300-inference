@@ -17,7 +17,7 @@ independent of how much host memory happens to be available.
 | `--engram` | `ENGRAM` | **gpu**, host |
 | `--dspark` | `DSPARK` | **off**, on |
 | `--image` | `ENGINE_IMAGE` | `lmsysorg/sglang:dev-dsv41`; `BAKED_IMAGE` takes precedence unless CLI image is supplied |
-| `--image-digest` | `IMAGE_DIGEST` | Optional `sha256:` plus 64 lowercase hex digits; no default digest |
+| `--image-digest` | `IMAGE_DIGEST` | Default tag uses the linux/amd64 pin below; other images require an explicit digest |
 | `--print-plan` / `--dry-run` | `DRY_RUN=1` (warm/launch) | Render only; no Docker, network, credentials or hardware access |
 | `--available-ram-gb` | none | Decimal GB assumption for host-mode dry-runs only; rejected for live launches |
 
@@ -93,12 +93,21 @@ process from the existing key delivered over Docker stdin. Never save that stdin
 payload. Rendered Docker commands require that payload; they are inspection
 artifacts, not standalone unauthenticated launches.
 
-To pin an image, supply a **real, qualified** digest in `IMAGE_DIGEST` or use
-`ENGINE_IMAGE=repository@sha256:...`. The ellipsis is documentation, not a valid
-value. No digest was invented or selected here. Without one, warm, dry-run and
-measurement warn and record the mutable tag plus the actual loaded image ID
-when available. A supplied digest is used for pull/inspect; launch uses the
-resolved immutable local image ID.
+The default `lmsysorg/sglang:dev-dsv41` tag is pinned to
+`sha256:c1633485e2ef3a8562fc93b2e3b686abb31c4499300bf5ce13ee5d491b65c386`.
+This is the tag's linux/amd64 manifest resolved from registry-1.docker.io on
+**2026-11-01**, not yet qualified on B300. The tag was last pushed 2026-09-11;
+its multi-arch index is `sha256:4a5d132a06a77c8331e15845f2e925adc788b00105097ad55409afa3f4fa4860`,
+which is not the launch pin.
+
+For other images, supply `IMAGE_DIGEST` or use `ENGINE_IMAGE=repository@sha256:...`
+(likewise for `BAKED_IMAGE`). The ellipsis is documentation, not a valid value.
+Unpinned warm launches and measurements fail. Dry runs also fail unless
+`ALLOW_UNPINNED=1`, which permits only `--print-plan` / `DRY_RUN=1` and prints a
+warning. It never permits a real launch. Legacy vLLM has no default digest and
+requires an explicit pin; use `ENGINE_IMAGE=...@sha256:...` to preserve legacy
+bootstrap dispatch. Pull/inspect use the pinned reference; launch uses the
+resolved immutable local image ID. Prestage and launch must use the same reference.
 
 ## Run one factor at a time on the prepared node
 
@@ -179,7 +188,7 @@ reuse; it does not prove traffic distribution or throughput on diverse sessions.
 
 ## TODO for noon: qualify the actual image
 
-- Select and record the real digest. Source SHA is not an image digest.
+- Qualify the default digest on B300, or select and record a replacement pin. Source SHA is not an image digest.
 - Confirm the image contains `sglang_router`, its `cache_aware`/`--dp-aware`
   options, and the current `--attn-dp-size`/`--enable-dp-lm-head` options.
 - Confirm `--engram-config` and the `EngramConfig.from_dict` validation API are

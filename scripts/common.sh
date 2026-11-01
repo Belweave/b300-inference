@@ -44,3 +44,21 @@ log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "$*" >&2; exit 1; }
 status() { python3 "$KIT_ROOT/scripts/status.py" "$1" "$2"; }
 need() { command -v "$1" >/dev/null || die "Missing prerequisite: $1"; }
+
+pin_engine_image() {
+    if [[ $ENGINE_IMAGE == *@* ]]; then
+        local embedded=${ENGINE_IMAGE#*@}
+        [[ -z ${IMAGE_DIGEST:-} || $IMAGE_DIGEST == "$embedded" ]] || die 'Conflicting image digests'
+        [[ -n $embedded ]] || die 'Empty image digest'
+        IMAGE_DIGEST=$embedded
+    fi
+    if [[ -n ${IMAGE_DIGEST:-} ]]; then
+        [[ $IMAGE_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || die 'IMAGE_DIGEST must be sha256: followed by 64 lowercase hex digits'
+        [[ $ENGINE_IMAGE == *@* ]] || ENGINE_IMAGE="$ENGINE_IMAGE@$IMAGE_DIGEST"
+    elif [[ $DRY_RUN == 1 && ${ALLOW_UNPINNED:-0} == 1 ]]; then
+        log "WARNING: image is unpinned (dry run only): $ENGINE_IMAGE" >&2
+    else
+        die "Unpinned image $ENGINE_IMAGE; set IMAGE_DIGEST or use image@sha256:"
+    fi
+    export ENGINE_IMAGE IMAGE_DIGEST
+}

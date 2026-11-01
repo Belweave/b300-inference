@@ -161,10 +161,11 @@ class TransferTests(unittest.TestCase):
     def test_image_push_hashes_before_docker_load_and_checks_image_id(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory); archive=root/'engine.tar.zst'; archive.write_bytes(b'fixture archive')
-            meta={'source_image':'engine:test','id':'sha256:abc','architecture':'amd64','os':'linux',
+            image = 'engine:test@sha256:'+'a'*64
+            meta={'source_image':image,'id':'sha256:abc','architecture':'amd64','os':'linux',
                   'archive_bytes':archive.stat().st_size,'archive_sha256':images.sha256(archive),'repo_digests':['engine@sha256:registry']}
             (root/'engine.json').write_text(json.dumps(meta))
-            env={'IMAGE_SOURCE':'push','PUSH_DIR':directory,'RUN_DIR':directory,'ENGINE_IMAGE':'engine:test'}
+            env={'IMAGE_SOURCE':'push','PUSH_DIR':directory,'RUN_DIR':directory,'ENGINE_IMAGE':image}
             proc=Mock(stdout=io.BytesIO(b'fake tar')); proc.wait.return_value=0; proc.poll.return_value=0
             with patch('images.subprocess.Popen',return_value=proc) as popen, \
                  patch('images.subprocess.run',return_value=subprocess.CompletedProcess([],0)) as run, \
@@ -173,10 +174,33 @@ class TransferTests(unittest.TestCase):
                 self.assertEqual(popen.call_args.args[0],['zstd','-dc',str(archive)])
                 self.assertEqual(run.call_args.args[0],['docker','load'])
             self.assertEqual(json.loads((root/'loaded-image.json').read_text())['effective_ref'],'sha256:abc')
+            with patch('images.subprocess.Popen') as popen:
+                with self.assertRaisesRegex(ValueError,'reference does not match'):
+                    images.acquire(dict(env, ENGINE_IMAGE='engine:test'))
+                popen.assert_not_called()
             archive.write_bytes(b'corrupted')
             with patch('images.subprocess.Popen') as popen:
                 with self.assertRaisesRegex(ValueError,'checksum mismatch'): images.acquire(env)
                 popen.assert_not_called()
+
+    def test_image_stage_and_pull_keep_the_pinned_reference(self):
+        image = 'engine:test@sha256:'+'a'*64
+        metadata = {'id':'sha256:abc', 'architecture':'amd64', 'os':'linux', 'repo_digests':[image]}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, STAGING_PLATFORM='linux/amd64'):
+            proc = Mock(stdout=io.BytesIO(b'fake tar'))
+            proc.wait.return_value = proc.poll.return_value = 0
+            with patch('images.subprocess.Popen', return_value=proc) as popen, \
+                 patch('images.subprocess.run', return_value=subprocess.CompletedProcess([],0)) as run, \
+                 patch('images.inspect', return_value=metadata) as inspect:
+                images.stage(image, Path(directory))
+                inspect.assert_called_once_with(image)
+                self.assertEqual(popen.call_args.args[0], ['docker', 'save', image])
+                self.assertEqual(run.call_args_list[0].args[0], ['docker', 'pull', '--platform', 'linux/amd64', image])
+                self.assertEqual(json.loads(Path(directory, 'engine.json').read_text())['source_image'], image)
+                run.reset_mock(); inspect.reset_mock()
+                images.acquire({'IMAGE_SOURCE':'pull', 'ENGINE_IMAGE':image, 'RUN_DIR':directory})
+                self.assertEqual(run.call_args.args[0], ['docker', 'pull', image])
+                inspect.assert_called_once_with(image)
 
 class ReverseAndIdentityTests(unittest.TestCase):
     def test_reverse_script_uses_loopback_R_and_keepalive_with_fake_ssh(self):

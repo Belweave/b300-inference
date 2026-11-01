@@ -225,15 +225,25 @@ who pays, and billing/resale authorization remain separate unresolved questions.
 Default: **SGLang `lmsysorg/sglang:dev-dsv41`**, the model cookbook's NVIDIA preview
 for H200/B200/B300/GB300. The cookbook explicitly says stock releases do not yet
 ship V4.1 support; a generic latest/stable tag is therefore not a safe substitute.
-The CUDA-13 installation lane and model recipe support SM100/SM103. Bootstrap
-records the actual image digest; pin `ENGINE_IMAGE=...@sha256:...` after the first
-qualified run because `dev-dsv41` can move.
+The CUDA-13 installation lane and model recipe support SM100/SM103. The default
+tag is pinned to its linux/amd64 manifest digest,
+`sha256:c1633485e2ef3a8562fc93b2e3b686abb31c4499300bf5ce13ee5d491b65c386`,
+resolved from registry-1.docker.io on **2026-11-01** (tag last pushed 2026-09-11).
+This digest is **not yet B300-qualified**. It is the platform manifest, not the
+multi-arch index `sha256:4a5d132a06a77c8331e15845f2e925adc788b00105097ad55409afa3f4fa4860`.
+Custom images require `IMAGE_DIGEST` or an `ENGINE_IMAGE=...@sha256:...` reference.
+Unpinned launches and measurements are hard errors. `ALLOW_UNPINNED=1` only
+permits an unpinned `--print-plan` / `DRY_RUN=1`, with a warning; it cannot permit
+a real launch. Staging and launch must use the same pinned reference.
 
 Fallback: **vLLM `vllm/vllm-openai:v0.32.0`**, the upstream release's CUDA-13.0 image;
 `vllm/vllm-openai:v0.32.0-cu129` is an explicitly published CUDA-12.9 alternative,
 not this kit's default. The v0.32.0 registry contains the V4.1 class. Exact B300
 throughput and every flag combination still require the rental test. There is no
 automatic engine switch on failure, which would hide the cause and waste time.
+There is no default vLLM digest: supply `ENGINE_IMAGE=vllm/vllm-openai:...@sha256:...`
+for legacy bootstrap, or set `IMAGE_DIGEST` in the node configuration. A caller-exported
+`IMAGE_DIGEST` still dispatches bootstrap to SGLang's node-only warm path.
 
 TensorRT-LLM is not chosen: no equally concrete 1017/B300 launch recipe was verified
 in this research. NVIDIA's model-specific NIM guide instead uses its **SGLang**
@@ -491,6 +501,8 @@ The kit never sources `.env.example`; an empty name is not a secret-file templat
 | `ACCOUNT_CONFIG`, `ACCOUNT_NAME`, `PROVIDER_HOOKS` | One nonsensitive account config; default config/account.env |
 | `MODEL_VARIANT`, `MODEL`, `MODEL_REVISION` | uncensored (default) / fp8 / nvfp4 chooses pinned model/revision; overrides must match committed metadata |
 | `ENGINE`, `ENGINE_IMAGE` | sglang or vllm; image defaults in config/ |
+| `IMAGE_DIGEST` | Default SGLang tag's linux/amd64 digest above; custom images and vLLM need an explicit pin |
+| `ALLOW_UNPINNED` | 0; 1 permits unpinned dry runs only, never a real launch or measurement |
 | `WEIGHTS_SOURCE`, `WEIGHTS_DIR` | hf / mirror / push / volume; /data/weights/<model-repo-name> |
 | `WEIGHTS_S3_URI`, `S3_ENDPOINT_URL` | Existing mirror prefix; optional R2/S3-compatible endpoint; no credentials in URLs |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` | Environment credentials for s5cmd; no credential files shipped |
@@ -515,10 +527,16 @@ The kit never sources `.env.example`; an empty name is not a secret-file templat
 | `SSE_RELAY`, `ENGINE_PORT`, `SSE_HEARTBEAT_SECONDS` | 1, 8001, 15; relay on :8000 in front of the engine (`SSE_RELAY=0`: engine on :8000) |
 | `MEM_FRACTION`, `CONTEXT_LENGTH`, `PARALLELISM`, `SPECULATION` | SGLang .85/262144 (vLLM .80/409600), tp / dp_ep, none / dspark |
 | `ENGINE_EXTRA_ARGS_JSON` | JSON argv string array, no shell evaluation; do not include secrets |
-| `MIN_FREE_GB`, `HEALTH_TIMEOUT_SECONDS` | 650 budget minus existing shards; 2400 seconds, also bounded by window |
+| `MIN_FREE_GB`, `HEALTH_TIMEOUT_SECONDS` | 650 budget minus existing shards; 1200 seconds shared by both legacy launches, bounded by `WINDOW_END-600` |
+| `WARM_TIMEOUT_SECONDS` | 1200; positive integer budget for all warm-up work, bounded by `WINDOW_END-780` |
 | `HF_MAX_WORKERS`, `HF_XET_HIGH_PERFORMANCE`, `HASH_WORKERS` | 16, 1, 4 |
 | `S3_WORKERS`, `S3_FILE_WORKERS`, `S3_PART_CONCURRENCY` | 32, 4, 8; bounded parallelism |
 | `WATCH_INTERVAL_SECONDS`, `POLL_SECONDS`, `DRY_RUN` | 60, 20, 0 |
+
+The warm-up budget includes weight acquisition, image preparation, and both
+launches if concurrency falls back to 64. A cold node that must download weights
+needs a larger `WARM_TIMEOUT_SECONDS` or pre-staged weights. Expiry fails closed:
+no ready signal, cleanup of the new container and relay, and a recorded `timeout`.
 
 ## Files and local verification
 
