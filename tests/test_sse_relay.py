@@ -28,48 +28,59 @@ def event(n):
     return b'data: ' + json.dumps({'choices': [{'delta': {'content': str(n)}}]}).encode() + b'\n\n'
 
 
+def fake_engine(seen, cancelled, reply='hi', deltas=None):
+    async def chat(request):
+        body = await request.json()
+        seen.append((dict(request.headers), body))
+        mode = body.get('mode')
+        if mode in ('late_headers', 'late_error'):
+            await asyncio.sleep(HB*4)
+        if mode in ('error', 'late_error'):
+            return web.json_response({'error': {'message': 'too long', 'type': 'BadRequestError'}}, status=400)
+        if not body.get('stream'):
+            await asyncio.sleep(HB*3)
+            choice = {'text': reply} if request.path == '/v1/completions' else {'message': {'content': reply}}
+            return web.json_response({'choices': [choice], 'usage': {'completion_tokens': 1}})
+        out = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
+        await out.prepare(request)
+        try:
+            if mode == 'silent':
+                await asyncio.sleep(HB*4)
+            if mode == 'split':
+                await out.write(b'data: {"a":')
+                await asyncio.sleep(HB*4)
+                await out.write(b'1}\n\n')
+            if deltas is not None:
+                for delta in deltas:
+                    await out.write(delta)
+            if mode == 'forever':
+                for n in range(10_000):
+                    await out.write(event(n)); await asyncio.sleep(HB/4)
+            if deltas is None:
+                for n in range(3):
+                    await out.write(event(n))
+            await out.write(b'data: [DONE]\n\n')
+        except asyncio.CancelledError:
+            cancelled.set(); raise
+        return out
+
+    async def health(request):
+        return web.Response(text='ok')
+
+    engine = web.Application()
+    engine.router.add_post('/v1/chat/completions', chat)
+    engine.router.add_post('/v1/completions', chat)
+    engine.router.add_get('/health', health)
+    return engine
+
+
 @unittest.skipIf(aiohttp is None, 'aiohttp not installed')
 class RelayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.seen = []
         self.cancelled = asyncio.Event()
 
-        async def chat(request):
-            body = await request.json()
-            self.seen.append((dict(request.headers), body))
-            mode = body.get('mode')
-            if mode in ('late_headers', 'late_error'):
-                await asyncio.sleep(HB*4)
-            if mode in ('error', 'late_error'):
-                return web.json_response({'error': {'message': 'too long', 'type': 'BadRequestError'}}, status=400)
-            if not body.get('stream'):
-                await asyncio.sleep(HB*3)
-                return web.json_response({'choices': [{'message': {'content': 'hi'}}], 'usage': {'completion_tokens': 1}})
-            out = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
-            await out.prepare(request)
-            try:
-                if mode == 'silent':
-                    await asyncio.sleep(HB*4)
-                if mode == 'split':
-                    await out.write(b'data: {"a":')
-                    await asyncio.sleep(HB*4)
-                    await out.write(b'1}\n\n')
-                if mode == 'forever':
-                    for n in range(10_000):
-                        await out.write(event(n)); await asyncio.sleep(HB/4)
-                for n in range(3):
-                    await out.write(event(n))
-                await out.write(b'data: [DONE]\n\n')
-            except asyncio.CancelledError:
-                self.cancelled.set(); raise
-            return out
-
-        async def health(request):
-            return web.Response(text='ok')
-
-        engine = web.Application()
-        engine.router.add_post('/v1/chat/completions', chat)
-        engine.router.add_get('/health', health)
+        engine = fake_engine(self.seen, self.cancelled)
         self.engine_port = free_port()
         self.engine = web.AppRunner(engine, handler_cancellation=True)
         await self.engine.setup()
