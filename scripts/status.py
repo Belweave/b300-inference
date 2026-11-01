@@ -33,7 +33,7 @@ state['ready'] = phase in ('ready', 'serving') and result == 'ok'
 if not state['ready']:
     state['public_endpoint'] = None
 if phase == 'serving' and state.get('network', {}).get('selected') == 'cloudflared':
-    state['public_endpoint'] = 'https://infer.belweave.tech'
+    state['public_endpoint'] = 'https://api.infer.belweave.ai'
 tmp = path.with_suffix('.tmp')
 tmp.write_text(json.dumps(state, indent=2) + '\n')
 tmp.replace(path)

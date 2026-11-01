@@ -136,6 +136,9 @@ worker and router, then nonstreaming and streaming completions through port 8000
 A ready signal preserves schema 1 and the selected `tunnel_slot`. No tunnel or
 gateway reconfiguration is needed: port 8000 is still the front door.
 
+Clients use `https://api.infer.belweave.ai/v1`; see the
+[gateway contract](cutover.md#gateway-contract) for the migration alias.
+
 ```bash
 # Fill in the timing_file path printed by this run, not an older warm:
 warm_report=runs/warm-REPLACE_WITH_THIS_RUN.json

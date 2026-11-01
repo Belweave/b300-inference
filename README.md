@@ -69,8 +69,13 @@ it yourself. Do not put secrets in launchd `EnvironmentVariables`.
 
 ## Network modes and handoff
 
+Client API base: `https://api.infer.belweave.ai/v1` (host
+`https://api.infer.belweave.ai`, base path `/v1`). `infer.belweave.tech` is a
+deprecated alias kept working during migration until clients move over.
+Netops owns DNS and Worker routing for both hosts.
+
 ```text
-infer.belweave.tech Worker (client keys, limits, between-window 503)
+api.infer.belweave.ai Worker (client keys, limits, between-window 503)
                 |
 infer-origin.belweave.tech / named tunnel b300-infer
                 |
@@ -502,7 +507,7 @@ it is preserved unchanged.
 * Existing weight mirror bucket/prefix/region and credentials, if desired.
 * Netops token and upstream-key handoff through env/credential manager; use
   canonical `CF_TUNNEL_TOKEN` and `INFER_UPSTREAM_KEY`; retire the deprecated alias.
-* Netops confirmation of infer.belweave.tech → infer-origin.belweave.tech,
+* Netops confirmation of api.infer.belweave.ai → infer-origin.belweave.tech,
   b300-infer ingress, origin protection, SSE timeouts, replica readiness, and a
   tested admission/drain endpoint. Updated relay version checks, free-port selection,
   expiry, custom SSH ports and rsync compatibility are implemented by Netops;

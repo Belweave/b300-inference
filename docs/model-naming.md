@@ -10,7 +10,7 @@ commercial-use rights to the underlying compute allocation.
 ## Current live service
 
 The running SGLang server serves `/models/dsv41`. It was not restarted to rename
-it. The Netops-owned Worker at `infer.belweave.tech` advertises
+it. The Netops-owned Worker at `api.infer.belweave.ai` advertises
 `deepseek-ai/DeepSeek-V4.1-Flash-1017` in `/v1/models` and rewrites that incoming
 model name to `/models/dsv41` before proxying upstream. Clients can send either
 name through the gateway. Hermes currently sends `/models/dsv41` unchanged.

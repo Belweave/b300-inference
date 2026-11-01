@@ -79,7 +79,7 @@ The relay checks cloudflared **2026.10.7**, reserves an available port in its st
 and uses `--info=progress2` only with rsync ≥3.1 (otherwise `--progress`).
 The relay dials **into** the node, with keepalive, ExitOnForwardFailure, and the
 helper's reconnect loop. Its cloudflared points at the relay-local listener.
-Public chain: `infer.belweave.tech` Worker → `infer-origin.belweave.tech` → named
+Public chain: `api.infer.belweave.ai` Worker → `infer-origin.belweave.tech` → named
 tunnel **b300-infer** → relay listener → node loopback. Confirm with Netops that
 named-tunnel remote ingress honors the intended per-replica local port; do not
 assume a `--url` flag overrides a remotely managed ingress configuration.
