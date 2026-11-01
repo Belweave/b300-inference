@@ -24,13 +24,43 @@ def metadata(body):
 
 class WarmLogicTests(unittest.TestCase):
     def test_committed_manifest_diff_and_small_files(self):
-        data=download.load_manifest(ROOT/'config/model-manifest.json')
+        data=download.load_manifest()
         plan=logic.shard_plan(data)
         self.assertEqual((len(plan['reuse']),len(plan['download']),plan['changed_bytes']),(21,27,199573008344))
         self.assertEqual(plan['download'],[f'model-{i:05d}-of-00048.safetensors' for i in range(13,40)])
-        self.assertIn('inference/kernel.py',data['differs_from_base'])
+        self.assertEqual(len(data['files']),52)
+        self.assertNotIn('inference/kernel.py',data['files'])
+        self.assertNotIn('README.md',data['files'])
         self.assertNotIn('config.json',data['differs_from_base'])
         self.assertEqual(data['model']['revision'],'c19ca5ca4eaeb79d29fdf08aea8327da95b1116a')
+        self.assertTrue(all(len(f['sha256']) == 64 for f in data['files'].values()))
+        self.assertEqual(sum(not f['lfs'] for f in data['files'].values()),4)
+        # The bootstrap path must not reintroduce optional files from the audit listing.
+        from weights import manifest
+        legacy=manifest({'MODEL_VARIANT':'uncensored','MODEL':data['model']['repo'],
+                         'MODEL_REVISION':data['model']['revision']})
+        self.assertEqual({f['path']:f['sha256'] for f in legacy['files']},
+                         {name:f['sha256'] for name,f in data['files'].items()})
+
+    def test_canonical_manifest_rejects_missing_hash_duplicate_and_optional_files(self):
+        original=json.loads(download.MANIFEST.read_text())
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'manifest.json'
+            for mistake in ('hash','duplicate','optional','revision'):
+                data=json.loads(json.dumps(original))
+                if mistake=='hash': data['files'][0]['sha256']=None
+                elif mistake=='duplicate': data['files'].append(data['files'][0])
+                elif mistake=='optional': data['files'][0]['filename']='README.md'
+                else: data['revision']='b'*40
+                path.write_text(json.dumps(data))
+                with self.assertRaises(ValueError): download.load_manifest(path)
+
+    def test_full_mirror_manifest_includes_verified_small_files(self):
+        raw=json.loads(download.MANIFEST.read_text())
+        data=download.load_manifest()
+        self.assertEqual(logic.verify_mirror(data,raw),set(data['files']))
+        raw['files'][0]['sha256']='0'*64
+        with self.assertRaises(ValueError): logic.verify_mirror(data,raw)
 
     def test_mirror_cannot_override_hash_size_revision_or_inventory(self):
         data={'model':{'revision':'a'*40},'files':{'x.safetensors':metadata(b'good')}}
@@ -65,19 +95,32 @@ class WarmLogicTests(unittest.TestCase):
         self.assertEqual(pool['max_total_num_tokens'],2000000)
         self.assertTrue(rows[0]['fits']);self.assertFalse(rows[1]['fits'])
         self.assertEqual(rows[0]['estimated_kv_bytes'],16*100000*512)
+        self.assertEqual(logic.recommend_running(pool,262144)['max_running_requests'],6)
+        self.assertEqual(logic.recommend_running({'max_total_num_tokens':100},262144)['max_running_requests'],0)
+        self.assertIsNone(logic.recommend_running({},262144)['max_running_requests'])
 
     def test_settings_drop_mtp_and_gate_engram(self):
-        data=download.load_manifest(ROOT/'config/model-manifest.json')
+        data=download.load_manifest()
         with self.assertRaisesRegex(ValueError,'mtp dropped'):settings(data,{'SPEC_DECODE':'mtp'},logic.ram_gate(0))
         config=settings(data,{},logic.ram_gate(0))
-        self.assertEqual(config['ENGRAM_HOST'],'0')
+        self.assertEqual(config['SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE'],'0')
+        self.assertEqual(config['CONTEXT_LENGTH'],'262144')
         args=subprocess.check_output([sys.executable,str(ROOT/'scripts/engine.py')],env={**os.environ,**config}).decode().split('\0')
         self.assertNotIn('--engram-config',args)
         self.assertIn('--enable-cache-report',args)
         self.assertIn('--cuda-graph-bs-decode',args)
         self.assertNotIn('--speculative-algorithm',args)
+        self.assertIn('--trust-remote-code',args)
+        self.assertNotIn('--chat-template',args)
+        for flag,value in (('--tp-size','8'),('--ep-size','8'),('--reasoning-parser','deepseek-v41'),('--tool-call-parser','deepseekv41')):
+            self.assertEqual(args[args.index(flag)+1],value)
         with self.assertRaises(ValueError):settings(data,{'WARM_GRAPH_BS':'1,128'},logic.ram_gate(0))
-        self.assertEqual(settings(data,{'ATTN_MODE':'dp_ep'},logic.ram_gate(300_000_000_000))['PARALLELISM'],'dp_ep')
+        for context in ('249999','400001'):
+            with self.assertRaises(ValueError):settings(data,{'CONTEXT_LENGTH':context},logic.ram_gate(0))
+        high=settings(data,{'ATTN_MODE':'dp_ep'},logic.ram_gate(300_000_000_000))
+        self.assertEqual(high['PARALLELISM'],'dp_ep')
+        self.assertEqual(high['SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE'],'1')
+        self.assertEqual(settings(data,{'MAX_RUNNING_REQUESTS':'6'},logic.ram_gate(0))['WARM_GRAPH_BS'],'1,2,4')
 
     def test_default_model_is_pinned_uncensored(self):
         env=dict(os.environ)
@@ -138,14 +181,29 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(calls),3)
             self.assertFalse(list(root.glob('*.incomplete')))
 
-    async def test_non_shards_are_fetched_even_with_a_base_copy(self):
+    async def test_small_files_reuse_verified_base_and_local_copies_without_network(self):
         data={'model':{'repo':'fixture/public','revision':'a'*40},'files':{'config.json':metadata(b'{}')},'differs_from_base':[]}
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);base=root/'base';base.mkdir();(base/'config.json').write_bytes(b'{}')
-            calls=[]
-            async def fake_fetch(session,url,target,f,floor,end):
-                calls.append(url);target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'{}');return {}
-            with patch('warm_download.fetch',side_effect=fake_fetch):
-                await download.acquire(data,root/'target',base,time.time()+30,{})
-            self.assertEqual(len(calls),1)
-            self.assertIn('/'+'a'*40+'/',calls[0])
+            with patch('warm_download.fetch',side_effect=AssertionError('unexpected network')):
+                rows=await download.acquire(data,root/'target',base,time.time()+30,{})
+                self.assertEqual(rows[0]['source'],'hardlink')
+                self.assertEqual((base/'config.json').stat().st_ino,(root/'target/config.json').stat().st_ino)
+                rows=await download.acquire(data,root/'target',base,time.time()+30,{})
+                self.assertEqual(rows[0]['source'],'verified-local')
+
+    async def test_bad_small_file_cannot_replace_existing_valid_file(self):
+        class Response:
+            content=None
+            async def __aenter__(self):self.content=self;return self
+            async def __aexit__(self,*args):pass
+            def raise_for_status(self):pass
+            async def iter_chunked(self,size):yield b'bad!'
+        class Session:
+            def get(self,*args,**kwargs):return Response()
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/'config.json';target.write_bytes(b'good')
+            with self.assertRaises(ValueError):
+                await download.fetch(Session(),'https://fixture.invalid/config.json',target,metadata(b'good'),0,time.time()+30)
+            self.assertEqual(target.read_bytes(),b'good')
+            self.assertFalse(target.with_name('config.json.incomplete').exists())

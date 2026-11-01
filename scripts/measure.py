@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import aiohttp
 import bench
 from warm_download import load_manifest
-from warm_logic import parse_pool, pool_table
+from warm_logic import parse_pool, pool_table, recommend_running
 from warm_network import probe
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +65,14 @@ async def sweep():
 
 
 def markdown(report):
+    advice = report['recommendation']
+    recommended = advice['max_running_requests']
+    recommendation = ('unknown (pool not logged)' if recommended is None else
+                      'no full context fits; reduce context/memory use before launch' if recommended == 0 else
+                      str(recommended))
     lines=['# Noon measurement','', 'Measurements apply only to this model, image and synthetic workload.', '',
+           f"Recommended MAX_RUNNING_REQUESTS: **{recommendation}** at {advice['context_tokens']} tokens per stream.",
+           advice['basis'], '',
            '| Streams | Average context | Tokens required | Pool with 10% headroom | Fits |',
            '|---:|---:|---:|---:|:---:|']
     for r in report['pool_table']:
@@ -99,7 +106,7 @@ def main():
     if not args.warm_report or not args.log: parser.error('--warm-report and --log required')
     warm=json.loads(args.warm_report.read_text())
     if warm['state'] != 'ready': raise ValueError('Warm report is not ready')
-    manifest=load_manifest(ROOT/'config/model-manifest.json')
+    manifest=load_manifest()
     if warm['model'] != manifest['model']: raise ValueError('Wrong model/revision')
     e=os.environ
     e['MODEL']=manifest['model']['repo'];e['ENDPOINT']=e.get('ENDPOINT','http://127.0.0.1:8000')
@@ -116,7 +123,8 @@ def main():
     report={'model':manifest['model'],'image_id':warm['image_id'],'engine_config':config,
             'config':{'attn_mode':'dp_ep' if config['PARALLELISM']=='dp_ep' else 'tp8','spec_decode':'off'},
             'workload':{'prompt_repeats':int(e.get('PROMPT_REPEATS','64')),'output_tokens':int(e.get('OUTPUT_TOKENS','256')),'fixed_operator_prompt':True},
-            'pool':pool,'pool_table':pool_table(pool),'network':probe(manifest,e.get('MIRROR_URL'),e.get('MIRROR_TEST_OBJECT','speed-test.bin')),
+            'pool':pool,'pool_table':pool_table(pool),'recommendation':recommend_running(pool,int(config['CONTEXT_LENGTH'])),
+            'network':probe(manifest,e.get('MIRROR_URL'),e.get('MIRROR_TEST_OBJECT','speed-test.bin')),
             'results':asyncio.run(sweep())}
     args.output.with_suffix('.json').write_text(json.dumps(report,indent=2)+'\n')
     summary=markdown(report);args.output.with_suffix('.md').write_text(summary);print(summary)

@@ -22,7 +22,7 @@ class LiveUpdateTests(unittest.TestCase):
     def test_profiles_generate_both_engine_commands(self):
         for engine in ('sglang', 'vllm'):
             for profile, context, running in (('longctx','409600','64'), ('throughput','32768','256')):
-                running = '128' if engine == 'sglang' and profile == 'longctx' else running
+                if engine == 'sglang' and profile == 'longctx': context = '262144'
                 env = dict(os.environ, ENGINE=engine, PROFILE=profile, DRY_RUN='1')
                 for name in ('CONTEXT_LENGTH','MAX_RUNNING_REQUESTS','CUDA_GRAPH_MAX_BS','ENGINE_EXTRA_ARGS_JSON'):
                     env.pop(name, None)

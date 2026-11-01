@@ -2,20 +2,26 @@
 
 Default model: `dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8` at
 `c19ca5ca4eaeb79d29fdf08aea8327da95b1116a`. The committed
-[manifest](../config/model-manifest.json) was rechecked against the public HF API
-on 2026-11-01. All 48 shards total 510.30 GB. Exactly 27 (00013–00039) differ
+[canonical manifest](../config/manifests/uncensored-c19ca5c.json) is Kai's verified
+52-file manifest. Shard metadata was rechecked against the public HF API on
+2026-11-01. All 48 shards total 510.30 GB. Exactly 27 (00013–00039) differ
 from the pinned base, totaling **199,573,008,344 bytes**. The other 21 can be
-hardlinked after verification. Shards 00047 and 00048 are about 101.5 GB each,
+hardlinked after verification (310.72 GB reused). Shards 00047 and 00048 are about 101.5 GB each,
 likely Engram tables: a full download is dominated by those two individual files,
 so adding parallel shard workers alone cannot remove that bottleneck. Partial
 warm-up hardlinks them. Across filesystems, copying them adds local I/O time.
 
-All small non-shard files are fetched from the pinned uncensored revision and
-checked by SHA256/LFS or Git blob SHA1 plus size. README, two branding PNGs and
-`inference/kernel.py` differ; config, tokenizer and shard index are identical.
+Only the 48 shards plus `config.json`, `model.safetensors.index.json`,
+`tokenizer.json` and `tokenizer_config.json` are fetched. Every file requires
+canonical SHA256 plus size, including the four small files whose SHA256s were
+computed from downloaded bytes. Those four files are identical to base and are
+also hardlinked after verification. README, two branding PNGs and
+`inference/kernel.py` differ; they are optional and are not downloaded.
 The kernel change likely does not affect SGLang, which uses its own kernels,
 but needs runtime qualification. Base-only encoding README/output fixtures are
-not copied. The model is MIT, DeepseekV41ForCausalLM, mixed FP8/FP4 experts.
+not copied. The full [79-file API listing](../config/model-manifest.json) is audit
+evidence only; it never overrides canonical hashes or expands downloads.
+The model is MIT, DeepseekV41ForCausalLM, mixed FP8/FP4 experts.
 
 ## On the replacement node (operator action, not run by this PR)
 
@@ -30,9 +36,16 @@ Key knobs: `BAKED_IMAGE`, `BASE_WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41`),
 `WEIGHTS_DIR` (default `/mnt/nvme/models/dsv41-uncensored`), `SHARD_WORKERS=16`,
 `HASH_WORKERS=4`, `MIN_MBPS=0` (decimal MB/s; measured over at least 10 seconds),
 `MEM_FRACTION=.85`, `CHUNKED_PREFILL_SIZE=8192`, `SCHEDULE_POLICY=lpm`,
+`CONTEXT_LENGTH=262144` (250000–400000), `MAX_RUNNING_REQUESTS=64` (provisional;
+replace from the noon pool report and sweep),
 `ATTN_MODE=tp8|dp_ep`, `SPEC_DECODE=off`, `WARM_GRAPH_BS=1,2,4,8,16,32,64`,
 `HIERARCHICAL_CACHE=0`, `ENGRAM_TABLE_GB=203`, `ENGRAM_HEADROOM_GB=32`.
 MTP is deliberately rejected; see [flag evidence and dropped options](sglang-warm-flags.md).
+Baseline is TP8/EP8. The parsers are `deepseek-v41` for reasoning and `deepseekv41`
+for tools, with `--trust-remote-code` and no Jinja template. Host Engram uses
+`SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` only after the available-RAM gate;
+otherwise it is explicitly `0`, with the reason recorded. These model-card
+settings still need qualification against the actual preview image.
 
 Bake `docker/Dockerfile.baked` before the rental, pin the result, and stage it
 locally as `BAKED_IMAGE`. A locally present baked image skips pulls; otherwise
@@ -53,10 +66,13 @@ files atomically and never write through existing hardlinks.
 
 Optional mirror: `MIRROR_URL/<revision>/manifest.json` must contain
 `{"revision":"<sha>","files":{"<shard>":{"sha256":"...","size":123}}}`
-with exactly the committed shard inventory and hashes. Any disagreement aborts.
+with exactly the committed shard inventory and hashes. It may additionally
+include any of the four canonical small files. Kai's 52-entry `files` array
+format is also accepted. Unknown files or any disagreement abort.
 Shards are at `MIRROR_URL/<revision>/<filename>`. HF errors, bad hash/size or a
 speed below the floor trigger a per-shard mirror retry; the mirror is verified
-identically. Failed partial transfers restart that shard. Small files stay on HF.
+identically. Failed partial transfers restart that shard. Small files can use
+mirror fallback only when included in its validated manifest; otherwise they use HF.
 No credentials belong in URLs. Netops owns the mirror; this PR creates no bucket.
 Network timing records only Cloudflare `colo`/`loc` and bounded 8 MiB HF/R2 probe
 speeds, not IPs or URLs. Set `MIRROR_TEST_OBJECT` (default `speed-test.bin`) for R2.
@@ -113,6 +129,11 @@ local sweeps at 1/8/16/32/64 streams, TTFT, decode tok/s, aggregate input/output
 rates, cached-token rate, errors, network probes, and a 16/32/48/64 by
 100K/250K/400K pool-fit table with 10% headroom. Missing pool/bytes/cache fields
 remain unknown; multiple DP pool lines use the minimum, never an assumed sum.
+The report prints recommended `MAX_RUNNING_REQUESTS = floor(0.9 *
+max_total_num_tokens / CONTEXT_LENGTH)` at the selected context, including zero
+when a full context cannot fit. This conservative bound assumes full contexts;
+validate it with real workload measurements. Tune `MEM_FRACTION` from that run,
+then rerun measurement; the starting .85 value is not a measured optimum.
 
 An operator separately prepares a DP/EP run, then uses `--compare` on the two
 JSON reports. Comparison rejects extra changed engine knobs/model/workload. MTP

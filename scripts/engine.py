@@ -9,11 +9,11 @@ if e.get('ENGINE_PORT', '8000') != '8000':
 common = ['--host', '127.0.0.1', '--port', e['ENGINE_PORT'], '--served-model-name', e['MODEL']]
 if e['ENGINE'] == 'sglang':
     args = ['python3', '-m', 'sglang.launch_server', '--model-path', '/weights',
-            '--tp', '8', '--context-length', e['CONTEXT_LENGTH'],
+            '--tp-size', '8', '--ep-size', '8', '--trust-remote-code', '--context-length', e['CONTEXT_LENGTH'],
             '--mem-fraction-static', e['MEM_FRACTION'], '--max-running-requests', e['MAX_RUNNING_REQUESTS'],
             '--chunked-prefill-size', e['CHUNKED_PREFILL_SIZE'],
             '--cuda-graph-max-bs-decode', e['CUDA_GRAPH_MAX_BS'],
-            '--reasoning-parser', 'auto', '--tool-call-parser', 'auto', '--enable-metrics']
+            '--reasoning-parser', 'deepseek-v41', '--tool-call-parser', 'deepseekv41', '--enable-metrics']
     # Pinned source and installed-image validation: docs/sglang-warm-flags.md.
     if e.get('WARM_GRAPH_BS'):
         args += ['--cuda-graph-bs-decode', *e['WARM_GRAPH_BS'].split(',')]
@@ -23,10 +23,8 @@ if e['ENGINE'] == 'sglang':
         args += ['--enable-cache-report']
     if e.get('HIERARCHICAL_CACHE') == '1':
         args += ['--enable-hierarchical-cache']
-    if e.get('ENGRAM_HOST') == '1':
-        args += ['--engram-config', '{"placement":"cpu"}']
     if e['PARALLELISM'] == 'dp_ep':
-        args += ['--attn-dp-size', '8', '--ep-size', '8']
+        args += ['--attn-dp-size', '8']
     if e['SPECULATION'] == 'dspark':
         args += ['--speculative-algorithm', 'DSPARK', '--speculative-dspark-block-size', '5']
 else:

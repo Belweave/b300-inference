@@ -14,9 +14,10 @@ METADATA = Path(__file__).resolve().parents[1]/'docs/model-metadata.json'
 
 def manifest(env):
     if env.get('MODEL_VARIANT') == 'uncensored' and not env.get('MODEL_METADATA'):
-        pinned = json.loads((METADATA.parent.parent/'config/model-manifest.json').read_text())
+        from warm_download import load_manifest
+        pinned = load_manifest()
         data = {'model': pinned['model']['repo'], 'revision': pinned['model']['revision'],
-                'files': [dict(path=name, size=f['size'], sha256=f['sha256'], git_sha1=f['blob_id'])
+                'files': [dict(path=name, size=f['size'], sha256=f['sha256'], git_sha1=f['git_blob_id'])
                           for name, f in pinned['files'].items()]}
     else:
         data = json.loads(Path(env.get('MODEL_METADATA', METADATA)).read_text())['variants'][env.get('MODEL_VARIANT', 'fp8')]

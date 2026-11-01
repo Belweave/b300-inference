@@ -27,24 +27,29 @@ def settings(data, env, ram):
     if env.get('ATTN_MODE','tp8') not in ('tp8','dp_ep'): raise ValueError('ATTN_MODE must be tp8 or dp_ep')
     if env.get('SPEC_DECODE','off') != 'off':
         raise ValueError('SPEC_DECODE=mtp dropped: no verified V4.1 MTP recipe; use off')
-    graph = [int(x) for x in env.get('WARM_GRAPH_BS','1,2,4,8,16,32,64').split(',')]
     maximum = int(env.get('MAX_RUNNING_REQUESTS','64'))
+    if maximum < 1: raise ValueError('MAX_RUNNING_REQUESTS must be positive')
+    graph = ([int(x) for x in env['WARM_GRAPH_BS'].split(',')] if env.get('WARM_GRAPH_BS')
+             else [n for n in (1,2,4,8,16,32,64) if n <= maximum])
     if not graph or sorted(set(graph)) != graph or graph[0] < 1 or graph[-1] > maximum:
         raise ValueError('Graph sizes must be increasing, unique and within max running')
+    context = int(env.get('CONTEXT_LENGTH','262144'))
+    if not 250_000 <= context <= 400_000:
+        raise ValueError('Warm CONTEXT_LENGTH must be 250000..400000 tokens')
     return dict(ENGINE='sglang', MODEL=data['model']['repo'], MODEL_REVISION=data['model']['revision'],
-                ENGINE_PORT='8000', CONTEXT_LENGTH=env.get('CONTEXT_LENGTH','409600'),
+                ENGINE_PORT='8000', CONTEXT_LENGTH=str(context),
                 MEM_FRACTION=env.get('MEM_FRACTION','0.85'), MAX_RUNNING_REQUESTS=str(maximum),
                 CHUNKED_PREFILL_SIZE=env.get('CHUNKED_PREFILL_SIZE','8192'), CUDA_GRAPH_MAX_BS=str(graph[-1]),
                 PARALLELISM='tp' if env.get('ATTN_MODE','tp8') == 'tp8' else 'dp_ep', SPECULATION='none',
                 WARM_GRAPH_BS=','.join(map(str,graph)), SCHEDULE_POLICY=env.get('SCHEDULE_POLICY','lpm'),
                 ENABLE_CACHE_REPORT='1', HIERARCHICAL_CACHE=env.get('HIERARCHICAL_CACHE','0'),
-                ENGRAM_HOST='1' if ram['enabled'] else '0')
+                SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE='1' if ram['enabled'] else '0')
 
 
 class Warm:
     def __init__(self, env):
         self.env = env
-        self.data = load_manifest(ROOT/'config/model-manifest.json')
+        self.data = load_manifest()
         self.end = deadline(int(env['WINDOW_END']))
         self.id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex[:8]
         self.run = ROOT/'runs'/('warm-'+self.id); self.run.mkdir(parents=True)
@@ -148,9 +153,11 @@ class Warm:
         required={a for a in args if a.startswith('--')}|{'--api-key'}
         missing=sorted(required-set(re.findall(r'--[a-z0-9-]+',help_text)))
         if missing: raise ValueError('Image lacks required flags: '+','.join(missing))
-        # Parse the exact selected argv inside the installed image without launching a model.
+        # Parse syntax/choices without ServerArgs post-init (which may touch
+        # model configuration or GPU state). Real launch/health validates runtime.
         self.command(['docker','run','--rm','--network','none','--entrypoint','python3',image,'-c',
-                      'import sys; from sglang.srt.server_args import prepare_server_args; prepare_server_args(sys.argv[1:])',*args[3:]])
+                      'import argparse,sys; from sglang.srt.server_args import ServerArgs; '
+                      'p=argparse.ArgumentParser(); ServerArgs.add_cli_args(p); p.parse_args(sys.argv[1:])',*args[3:]])
         self.record['argv_without_key']=args
         self.command(['docker','create','-i','--name',self.name,'--gpus','all','--network','host','--ipc','host',
                       '--cap-add','SYS_NICE','--log-driver','none','--mount',f'type=bind,src={self.weights_dir},dst=/weights,readonly',
@@ -193,7 +200,8 @@ class Warm:
             sock.bind(('127.0.0.1',8000))
         mem=re.search(r'^MemAvailable:\s+(\d+) kB',Path('/proc/meminfo').read_text(),re.M)
         if not mem: raise ValueError('MemAvailable is unavailable')
-        ram=ram_gate(int(mem[1])*1024,headroom=int(float(self.env.get('ENGRAM_HEADROOM_GB','32'))*1e9))
+        ram=ram_gate(int(mem[1])*1024,table=int(float(self.env.get('ENGRAM_TABLE_GB','203'))*1e9),
+                     headroom=int(float(self.env.get('ENGRAM_HEADROOM_GB','32'))*1e9))
         selected=settings(self.data,self.env,ram)
         self.record.update(ram=ram,config=selected); self.save()
         with ThreadPoolExecutor(max_workers=3) as pool:

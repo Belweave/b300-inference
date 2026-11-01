@@ -10,28 +10,46 @@ import time
 from urllib.parse import quote
 
 import aiohttp
-from warm_logic import shard_plan, verify_mirror, fallback
+from warm_logic import verify_mirror, fallback
+
+MANIFEST = Path(__file__).resolve().parents[1]/'config/manifests/uncensored-c19ca5c.json'
 
 
-def load_manifest(path):
-    data = json.loads(Path(path).read_text())
-    for entry in ('model', 'base'):
-        revision = data[entry]['revision']
+def load_manifest(path=MANIFEST):
+    raw = json.loads(Path(path).read_text())
+    for key in ('revision', 'base_revision'):
+        revision = raw[key]
         if len(revision) != 40 or any(c not in '0123456789abcdef' for c in revision):
             raise ValueError('An immutable revision is required')
+    # Reuse selection is the API-verified diff for this exact pair. Hashes and
+    # sizes always come from Kai's canonical manifest, never the full HF listing.
+    if (raw['repo'], raw['revision'], raw['base_repo'], raw['base_revision']) != (
+        'dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8', 'c19ca5ca4eaeb79d29fdf08aea8327da95b1116a',
+        'deepseek-ai/DeepSeek-V4.1-Flash-1017', '1bae0e1088993b9b82de08f59de5be5a34e42170'):
+        raise ValueError('No verified reuse plan for this model/base revision pair')
+    files = {f['filename']: f for f in raw['files']}
+    expected = {f'model-{i:05d}-of-00048.safetensors' for i in range(1, 49)} | {
+        'config.json', 'model.safetensors.index.json', 'tokenizer.json', 'tokenizer_config.json'}
+    if len(files) != len(raw['files']) or set(files) != expected:
+        raise ValueError('Canonical manifest must contain exactly 48 shards and four small files')
+    data = {'model': {'repo': raw['repo'], 'revision': raw['revision']},
+            'base': {'repo': raw['base_repo'], 'revision': raw['base_revision']},
+            'files': files,
+            'differs_from_base': [f'model-{i:05d}-of-00048.safetensors' for i in range(13, 40)]}
     for name, f in data['files'].items():
         p = PurePosixPath(name)
         if p.is_absolute() or '..' in p.parts or '\\' in name or not isinstance(f['size'], int) or f['size'] < 0:
             raise ValueError('Unsafe manifest entry')
-        if not f.get('sha256') and not f.get('blob_id'):
-            raise ValueError('Missing checksum')
+        digest = f.get('sha256', '')
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+            raise ValueError('Every canonical file requires SHA256')
     return data
 
 
 def stamp(path, f):
     s = path.stat()
     return {'size': s.st_size, 'mtime_ns': s.st_mtime_ns, 'ctime_ns': s.st_ctime_ns,
-            'inode': s.st_ino, 'device': s.st_dev, 'expected': f.get('sha256') or f['blob_id']}
+            'inode': s.st_ino, 'device': s.st_dev, 'expected': f['sha256']}
 
 
 def marker(cache, path):
@@ -53,11 +71,10 @@ def verified(path, f, cache, force=False):
             return True
     except (FileNotFoundError, ValueError):
         pass
-    h = hashlib.sha256() if f.get('sha256') else hashlib.sha1()
-    if not f.get('sha256'): h.update(f"blob {f['size']}\0".encode())
+    h = hashlib.sha256()
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(8*1024*1024), b''): h.update(block)
-    good = h.hexdigest() == (f.get('sha256') or f['blob_id']) and before == stamp(path, f)
+    good = h.hexdigest() == f['sha256'] and before == stamp(path, f)
     if good: remember(path, f, cache)
     return good
 
@@ -85,8 +102,7 @@ def write_block(stream, digest, block):
 async def fetch(session, url, target, f, floor, end):
     tmp = target.with_name(target.name+'.incomplete'); target.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic(); count = 0
-    h = hashlib.sha256() if f.get('sha256') else hashlib.sha1()
-    if not f.get('sha256'): h.update(f"blob {f['size']}\0".encode())
+    h = hashlib.sha256()
     try:
         timeout = aiohttp.ClientTimeout(total=max(0.01, end-time.time()), sock_read=30)
         async with session.get(url, timeout=timeout) as response:
@@ -100,7 +116,7 @@ async def fetch(session, url, target, f, floor, end):
                     if elapsed >= 10 and fallback(mbps=count/elapsed/1e6, floor=floor):
                         raise ValueError('Download below speed floor')
         elapsed = max(time.monotonic()-started, 0.001)
-        valid = count == f['size'] and h.hexdigest() == (f.get('sha256') or f['blob_id'])
+        valid = count == f['size'] and h.hexdigest() == f['sha256']
         if fallback(valid=valid, mbps=count/elapsed/1e6 if elapsed >= 10 else None, floor=floor):
             raise ValueError('Download checksum/size/speed failed')
         tmp.replace(target)
@@ -119,8 +135,9 @@ async def acquire(data, root, base, end, env):
     semaphore = asyncio.Semaphore(workers)
     hashes = asyncio.Semaphore(int(env.get('HASH_WORKERS', '4')))
     if int(env.get('HASH_WORKERS', '4')) not in range(1, 17): raise ValueError('HASH_WORKERS must be 1..16')
-    reuse = set(shard_plan(data)['reuse']); records = []
+    reuse = set(data['files']) - set(data['differs_from_base']); records = []
     mirror = env.get('MIRROR_URL', '').rstrip('/')
+    mirror_files = set()
     revision = data['model']['revision']
     # Retained for older HF clients; this downloader uses bounded aiohttp streams,
     # not hf_transfer (removed in huggingface_hub 1.x).
@@ -129,7 +146,7 @@ async def acquire(data, root, base, end, env):
         if mirror:
             async with session.get(mirror+'/'+revision+'/manifest.json', timeout=aiohttp.ClientTimeout(total=min(30,max(.01,end-time.time())))) as response:
                 response.raise_for_status()
-                verify_mirror(data, await response.json())
+                mirror_files = verify_mirror(data, await response.json())
         async def check(path, f):
             async with hashes:
                 return await asyncio.to_thread(verified, path, f, cache, env.get('FORCE_HASH') == '1')
@@ -138,7 +155,7 @@ async def acquire(data, root, base, end, env):
                 if time.time() >= end: raise TimeoutError('Warm deadline reached')
                 target = root/name
                 if not target.resolve().is_relative_to(root.resolve()): raise ValueError('Unsafe target path')
-                if name.endswith('.safetensors') and await check(target, f):
+                if await check(target, f):
                     records.append({'file':name, 'source':'verified-local'}); return
                 if name in reuse and await check(base/name, f):
                     source_state = stamp(base/name, f)
@@ -157,7 +174,7 @@ async def acquire(data, root, base, end, env):
                     stats = await fetch(session, url, target, f, float(env.get('MIN_MBPS','0')), end)
                     source = 'hf'
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-                    if not mirror or not name.endswith('.safetensors'): raise
+                    if name not in mirror_files: raise
                     stats = await fetch(session, mirror+'/'+revision+'/'+quote(name), target, f, 0, end)
                     source = 'mirror'
                 remember(target, f, cache)
