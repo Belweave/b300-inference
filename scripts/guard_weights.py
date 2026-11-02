@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+from time import time_ns
 import urllib.request
 from urllib.parse import quote, urlsplit
 
@@ -59,14 +60,57 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def stamp(path):
+    s = path.stat()
+    return [s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_ino, s.st_dev]
+
+
+def marker(path):
+    # Beside the weights, so a copied or remounted dir never inherits a stale marker.
+    return path.parent/'.verified'/(path.name+'.json')
+
+
 def matches(path, f):
+    """Hash once; after that a marker with the same inode, size and times is enough.
+    Any write changes ctime, which can't be set back. Some filesystems keep ctime in
+    coarse ticks, so a marker only counts for files last changed a second before it
+    was written (git's racy-file rule); anything newer gets hashed again."""
     if not path.is_file() or path.stat().st_size != f['size']:
         return False
+    try:
+        digest, written, *saved = json.loads(marker(path).read_text())
+        now = stamp(path)
+        if digest == f['sha256'] and saved == now and now[2] < written-1_000_000_000:
+            return True
+    except (OSError, ValueError):
+        pass
     digest = hashlib.sha256()
     with path.open('rb') as stream:
         while chunk := stream.read(CHUNK):
             digest.update(chunk)
-    return digest.hexdigest() == f['sha256']
+    if digest.hexdigest() != f['sha256']:
+        return False
+    remember(path, f)
+    return True
+
+
+def remember(path, f):
+    marker(path).parent.mkdir(exist_ok=True)
+    marker(path).write_text(json.dumps([f['sha256'], time_ns(), *stamp(path)]))
+
+
+def missing_bytes(env, repo, revision, root):
+    """Bytes still to download for this guard: files that are absent or don't verify."""
+    dest = Path(root)/repo/revision
+    return sum(f['size'] for f in pinned_files(env, repo, revision) if not matches(dest/f['filename'], f))
+
+
+def verify(env, repo, revision, root):
+    """Launch-time check: every pinned file is present and verified, or refuse."""
+    dest = Path(root)/repo/revision
+    if not all(matches(dest/f['filename'], f) for f in pinned_files(env, repo, revision)):
+        raise ValueError(f'{repo} weights are missing or changed since preflight')
+    return str(dest.absolute())
 
 
 def fetch(url, headers, redirects, target, f, timeout):
@@ -106,6 +150,8 @@ def stage(env, repo, revision, root, timeout=60):
         if matches(target, f):
             counts['verified-local'] = counts.get('verified-local', 0)+1
             continue
+        # Drop the bad copy first, so disk use never peaks above what preflight checked.
+        target.unlink(missing_ok=True)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name+'.part')
         for name, base, headers, redirects in sources:
@@ -119,11 +165,11 @@ def stage(env, repo, revision, root, timeout=60):
                     failed.append(f"{name}: {f['filename']} checksum mismatch")
             if ok:
                 tmp.replace(target)
+                remember(target, f)
                 counts[name] = counts.get(name, 0)+1
                 break
             tmp.unlink(missing_ok=True)
         else:
-            target.unlink(missing_ok=True)
             raise ValueError(f'no verified {repo} weights ('+'; '.join(failed)+')')
     return {'dir': str(dest), 'files': len(files), 'bytes': sum(f['size'] for f in files),
             'sources': counts, 'failed': failed}

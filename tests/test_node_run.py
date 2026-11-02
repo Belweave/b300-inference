@@ -161,18 +161,20 @@ def tunnel_fixture(home):
     return config
 
 
-def guard_fixture(home):
-    """A one-file manifest for both PIN guards, already staged, so the gate reuses it offline."""
-    body = b'fixture guard weights\n'
-    files = [{'filename': 'config.json', 'size': len(body), 'sha256': hashlib.sha256(body).hexdigest(), 'lfs': False}]
-    guards_list = []
-    for repo in ('mistralai/Shieldstral-1.0-3B', 'Qwen/Qwen3Guard-Gen-0.6B'):
+GUARD_BODY = b'fixture guard weights\n'
+GUARD_REPOS = ('mistralai/Shieldstral-1.0-3B', 'Qwen/Qwen3Guard-Gen-0.6B')
+MIRROR_HEADER = 'Authorization: Bearer mirror-fixture'
+
+
+def guard_fixture(home, staged=True):
+    """A one-file manifest for both PIN guards. staged=True puts verified copies in place."""
+    files = [{'filename': 'config.json', 'size': len(GUARD_BODY), 'sha256': hashlib.sha256(GUARD_BODY).hexdigest()}]
+    for repo in GUARD_REPOS if staged else ():
         folder = home/'guards-cache'/repo/PIN
         folder.mkdir(parents=True, exist_ok=True)
-        (folder/'config.json').write_bytes(body)
-        guards_list.append({'repo': repo, 'revision': PIN, 'files': files})
+        (folder/'config.json').write_bytes(GUARD_BODY)
     manifest = home/'guards.json'
-    manifest.write_text(json.dumps({'guards': guards_list}))
+    manifest.write_text(json.dumps({'guards': [{'repo': r, 'revision': PIN, 'files': files} for r in GUARD_REPOS]}))
     return {'GUARD_WEIGHTS_DIR': str(home/'guards-cache'), 'GUARD_MANIFEST': str(manifest)}
 
 
@@ -189,6 +191,8 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         app.router.add_get('/health', self.health)
         app.router.add_post('/v1/safety/csam', self.classify)
+        app.router.add_get('/models/{tail:.*}', self.mirror)
+        self.mirror_paths = []
         self.server = TestServer(app, host='127.0.0.1', handler_cancellation=True)
         await self.server.start_server()
         self.addAsyncCleanup(self.server.close)
@@ -202,7 +206,8 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
                     'NODE_RUN_WARM_CMD': str(self.folder/'warm.sh'), 'NODE_RUN_RELAY_URL': self.url,
                     'NODE_RUN_TUNNEL_PUBLIC_URL': self.url, 'TUNNEL_WAIT_SECONDS': '0.15',
                     'NODE_RUN_GUARD_HEALTH_URL': self.url, 'FAKE_STATE': str(self.folder),
-                    'WEIGHTS_DIR': str(self.folder/'weights'), **guard_fixture(self.folder),
+                    'WEIGHTS_DIR': str(self.folder/'weights'), **guard_fixture(self.folder, staged=False),
+                    'MIRROR_URL': self.url+'/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
                     'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'upstream-fixture',
                     'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN,
                     'LOADTEST_DURATION_SECONDS': '0.12', 'GUARD_TIMEOUT_SECONDS': '1'}
@@ -213,6 +218,14 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
                 shutil.rmtree(path)
             else:
                 path.unlink(missing_ok=True)
+
+    async def mirror(self, request):
+        self.mirror_paths.append(request.path)
+        if request.headers.get('Authorization') != MIRROR_HEADER.split(': ', 1)[1]:
+            return web.Response(status=401)
+        if not request.path.endswith('/'+PIN+'/config.json'):
+            return web.Response(status=404)
+        return web.Response(body=GUARD_BODY)
 
     async def health(self, request):
         return web.Response(text='hello world', status=503 if self.mode == 'guard-down' else 200)
@@ -274,6 +287,10 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(output.index('NODE READY FOR DRILL'), output.index('TUNNEL UP'))
         self.assertLess(output.index('TUNNEL UP'), output.index('PASS key-leak'))
         self.assertLess(output.index('PASS key-leak'), output.index('TEARDOWN BY'))
+        # Guards stage from the mirror inside preflight, before warm starts.
+        self.assertLess(output.index('guard weights '), output.index('PASS preflight'))
+        self.assertEqual([p['weights']['sources'] for p in report['guards']], [{'mirror': 1}, {'mirror': 1}])
+        self.assertEqual(len(self.mirror_paths), 2)
         self.assertEqual(report['tunnel']['status'], 'up')
         self.assertEqual(report['tunnel']['pid'], 4321)
         self.assertTrue(report['tunnel']['launched'])
@@ -293,6 +310,30 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(r['phase'] == 'output' for r in self.calls))
         self.assertTrue(all(r['text'] == safety.CANARY or r['text'].replace('hello world ', '') in ('', 'hell')
                             or r['text'] == 'hello world' for r in self.calls))
+
+    async def test_rerun_reuses_verified_guards_without_downloading(self):
+        code, output, _ = await self.invoke()
+        self.assertEqual(code, 0, output)
+        self.mirror_paths.clear()
+        for path in self.folder.glob('guards'):
+            path.unlink()
+        code, output, report = await self.invoke()
+        self.assertEqual(code, 0, output)
+        self.assertEqual([p['weights']['sources'] for p in report['guards']],
+                         [{'verified-local': 1}, {'verified-local': 1}])
+        self.assertEqual(self.mirror_paths, [])
+        self.assertEqual(report['measurements']['disk']['guard_required_bytes'], 0)
+
+    async def test_changed_guard_file_after_preflight_is_refused_at_launch(self):
+        target = self.folder/'guards-cache'/GUARD_REPOS[0]/PIN/'config.json'
+        # Tamper right after preflight finishes staging, as a stand-in for a change during warm.
+        warm = (self.folder/'warm.sh').read_text()
+        (self.folder/'warm.sh').write_text(warm.replace('import sys\n', 'import sys\nPath(%r).write_bytes(b"tampered weights!!!!!\\n")\n' % str(target), 1))
+        code, output, report = await self.invoke()
+        self.assertNotEqual(code, 0)
+        self.assertIn('FAIL guards: '+GUARD_REPOS[0]+' weights are missing or changed since preflight', output)
+        docker = (self.folder/'docker.jsonl').read_text() if (self.folder/'docker.jsonl').exists() else ''
+        self.assertNotIn('"run"', docker)
 
     async def test_seven_gpus_fail_preflight(self):
         code, output, report = await self.invoke(FAKE_GPU_COUNT='7')
@@ -647,6 +688,45 @@ class PureNodeTests(unittest.TestCase):
         self.assertEqual(node_run.provisioned('1970-01-01T00:16:40Z', 2000), 1000)
         with self.assertRaises(node_run.GateFailure):
             node_run.provisioned('1970-01-01T00:16:40', 2000)
+
+    def test_disk_short_for_guards_fails_preflight_before_any_download(self):
+        import guard_weights
+        Usage = shutil._ntuple_diskusage
+        # Enough for the guards alone, enough for the main model alone, then short for both together.
+        for mode, free, action, reason in (
+                ('guards', 1000, 'warn', 'insufficient free space for guard weights: need 1.0 GB, 0.0 GB free'),
+                ('shared', 550e9+1, 'fail', 'insufficient free space at weights and guard weights (same filesystem)')):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir='/tmp') as folder:
+                scratch = Path(folder)
+                for name, body in [('nvidia-smi', NVIDIA), ('docker', DOCKER)]:
+                    (scratch/name).write_text('#!'+sys.executable+'\n'+body)
+                    (scratch/name).chmod(0o700)
+                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE,
+                       'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1', 'FAKE_STATE': folder,
+                       'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch, staged=False),
+                       'MIRROR_URL': 'http://127.0.0.1:9/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
+                       'DISK_SPACE_ACTION': action, 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'fixture',
+                       'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN}
+                with patch.dict(os.environ, env, clear=True):
+                    obj = node_run.NodeRun()
+                try:
+                    with patch('node_run.socket.socket'), patch('guard_weights.fetch') as fetch, \
+                         patch('node_run.shutil.disk_usage', return_value=Usage(10**13, 10**13-free, int(free))), \
+                         redirect_stdout(io.StringIO()):
+                        with self.assertRaises(node_run.GateFailure) as caught:
+                            obj.preflight()
+                    self.assertEqual(str(caught.exception), reason)
+                    fetch.assert_not_called()
+                    disk = obj.record['measurements']['disk']
+                    self.assertTrue(disk['shared_filesystem'])
+                    self.assertEqual(disk['guard_required_bytes'], 2*len(GUARD_BODY)+node_run.GUARD_DISK_MARGIN)
+                    self.assertFalse(any(p.is_file() for p in (scratch/'guards-cache').rglob('*')))
+                finally:
+                    import signal
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    if obj.lock is not None: obj.lock.close()
+                    obj.path.unlink(missing_ok=True)
+                    shutil.rmtree(obj.run)
 
     def test_full_runner_with_mock_transport_when_tcp_is_unavailable(self):
         """Separate control-flow coverage; the real HTTP rehearsal above stays mandatory."""
