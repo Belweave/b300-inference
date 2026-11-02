@@ -6,6 +6,35 @@ Run from the operator machine, with the existing classifier key as stdin:
 ssh <node> 'cd ~/b300-inference && ./scripts/node-run.sh' < /path/to/classifier-key
 ```
 
+## Steady boot and calibration
+
+`./scripts/node-run.sh` is the steady boot: preflight (which downloads and
+verifies both guards), warm (which downloads and verifies the main model), tunnel,
+guards, handoff. It tests nothing. The guards always load, from the verified
+weights, and the second one starts once the first has loaded, because each sizes
+its memory against what is free on GPU 0. Nothing waits for the second guard. Until both
+answer, the relay returns 503 for any check that needs a missing guard, so
+traffic is refused, never served unguarded. Downloads keep their SHA256 checks.
+They hash while streaming, and a rerun reads markers, so they add no extra pass.
+
+`./scripts/node-run.sh --calibrate` (or `CALIBRATE=1`) runs the one-time suite
+described below: guard benchmark and canary, relay-safety, kv-pool, load test,
+fit with the single 64 fallback, and the public tunnel probe. Run it by hand for
+a new node type, guard revision, engine image or serving config. Nothing starts
+it automatically. Each report has `mode` (`steady` or `calibrate`) and a
+`fingerprint` of what the run used: GPU model and count, engine image digest, guard
+revisions, and a hash of `scripts/guards.py`, `config/sglang.env` and
+`config/model-manifest.json`. Compare the fingerprint with the last calibration report to see
+whether one is due. A steady boot serves at warm's effective concurrency
+(`MAX_RUNNING_REQUESTS`, default 128, with warm's own KV/OOM fallback to 64). Set
+it to whatever the last calibration decided.
+
+The numbered gates below are the calibration run. Steady runs gates 1 to 4,
+then the tunnel without the public probe, then guards without the benchmark,
+then handoff and key-leak.
+
+## Supervised run
+
 Chief Engineer supervises the whole run. There is no retry loop or container
 restart policy. The only allowed relaunch is the existing warm fit fallback to
 64. The script never releases the allocation, including on failure. It always
@@ -193,7 +222,8 @@ ENGINE KEPT: the engine is still up. Fix the cause, then rerun only the remainin
 ```
 
 With `RESUME=<run id>` the run gates are `preflight`, `key`, `resume`, then the
-late gates, `handoff` and `key-leak`. They append to the same
+late gates, `handoff` and `key-leak`. A resume keeps the run's mode; a steady
+run can be finished as a calibration with `--calibrate`. They append to the same
 `runs/<run id>.json`. `resume` fails closed unless all of these hold:
 
 - the engine container named in the warm READY signal exists and is running;
@@ -219,7 +249,7 @@ removes every container named `b300-warm-*` or `node-run-*`, and stops any
 for example `port 8000 (relay) is held by a process that is not ours`. The
 report lists what was removed under `cleanup`.
 
-## Guard benchmark
+## Guard benchmark (calibration only)
 
 Right after both guards are healthy, each one gets `GUARD_BENCH_ROUNDS` (8) passes
 over four benign sentences, then the drill canary `CANARY-CSAM-TEST-7f3a`. No
@@ -235,7 +265,7 @@ fails the guards gate. A flagged benign text prints a warning only.
 
 `make dry-run` prints the plans, then runs node_run end to end with fake GPUs,
 Docker, warm and a loopback server for the guards and relay. Verdicts are
-mocked. The run fails at the tunnel, keeps the engine, and is resumed through
+mocked. It runs a steady boot, then a calibration run. The calibration run fails at the tunnel, keeps the engine, and is resumed through
 guards, the guard benchmark, relay-safety, loadtest, fit and tunnel. CI
 (`.github/workflows/ci.yml`) runs lint, the unit tests and `make dry-run` on
 each pull request. None of it proves B300 latency, model accuracy or that the

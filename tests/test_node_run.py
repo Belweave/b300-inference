@@ -94,6 +94,9 @@ elif sys.argv[1] == 'run':
     (state/'guards').touch()
     print('fake-container')
 elif sys.argv[1] == 'inspect' and '--format' in sys.argv:
+    # Guard containers exist only once one has been run.
+    if not (state/'guards').exists():
+        sys.exit(1)
     print('true')
 elif sys.argv[1] == 'inspect':
     # The engine container, as warm.sh left it.
@@ -246,7 +249,9 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
                     'MIRROR_URL': self.url+'/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
                     'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'upstream-fixture',
                     'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN,
-                    'LOADTEST_DURATION_SECONDS': '0.12', 'GUARD_TIMEOUT_SECONDS': '1'}
+                    'LOADTEST_DURATION_SECONDS': '0.12', 'GUARD_TIMEOUT_SECONDS': '1',
+                    # Most of these tests cover the one-time suite; SteadyBootTests drop this.
+                    'CALIBRATE': '1'}
 
     def remove_runs(self):
         for path in set((ROOT/'runs').glob('node-run-*'))-self.before:
@@ -300,7 +305,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({'flag': False})
         return web.json_response({'flag': body['text'] == safety.CANARY, 'score': 0.123, 'model': 'mock@fixture'})
 
-    async def invoke(self, key=KEY+'\r\n', tty=False, **env):
+    async def invoke(self, key=KEY+'\r\n', tty=False, args=(), **env):
         if tty:
             master, slave = pty.openpty()
             self.addCleanup(os.close, master)
@@ -308,7 +313,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
             stdin = slave
         else:
             stdin = asyncio.subprocess.PIPE
-        process = await asyncio.create_subprocess_exec(str(ROOT/'scripts/node-run.sh'),
+        process = await asyncio.create_subprocess_exec(str(ROOT/'scripts/node-run.sh'), *args,
                     cwd=ROOT, env={**self.env, **env}, stdin=stdin,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(process.communicate(None if tty else key.encode()), 10)
@@ -371,6 +376,63 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(r['phase'] == 'output' for r in self.calls))
         self.assertTrue(all(r['text'] == safety.CANARY or r['text'].replace('hello world ', '') in ('', 'hell')
                             or r['text'] == 'hello world' for r in self.calls))
+
+    async def test_steady_boot_is_the_default_and_tests_nothing(self):
+        code, output, report = await self.invoke(CALIBRATE='0')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(report['mode'], 'steady')
+        self.assertEqual([r['name'] for r in report['gates']], list(node_run.STEADY_GATES))
+        # No benchmark, canary, relay check, load test, fit or public probe.
+        for key in ('guard_bench', 'fit', 'fallback_reason'):
+            self.assertNotIn(key, report)
+        self.assertNotIn('loadtests', report['measurements'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.tunnel_calls, [])
+        # Both guards still load, from the verified staged weights, before handoff.
+        docker = [json.loads(line) for line in (self.folder/'docker.jsonl').read_text().splitlines()]
+        self.assertEqual(len([args for args in docker if args[0] == 'run']), 2)
+        self.assertEqual(report['guards_started'], [plan['name'] for plan in report['guards']])
+        self.assertLess(output.index('PASS guards'), output.index('NODE READY FOR DRILL mode=steady '))
+        self.assertEqual(report['decision'], 128)
+        self.assertEqual(report['fingerprint']['node'], 'NVIDIA B300 x8')
+        self.assertEqual(report['fingerprint']['guards'], dict.fromkeys(GUARD_REPOS, PIN))
+        self.assertTrue(report['fingerprint']['engine_image'].startswith('sha256:'))
+        self.assertRegex(report['fingerprint']['serving_config'], r'^[0-9a-f]{16}$')
+
+    async def test_calibrate_flag_runs_the_full_suite(self):
+        code, output, report = await self.invoke(CALIBRATE='0', args=('--calibrate',))
+        self.assertEqual(code, 0, output)
+        self.assertEqual(report['mode'], 'calibrate')
+        self.assertEqual([r['name'] for r in report['gates']], list(node_run.GATES))
+        self.assertIn('guard_bench', report)
+        self.assertTrue(report['measurements']['loadtests'])
+
+    async def test_steady_boot_refuses_changed_guard_weights_and_never_serves_without_guards(self):
+        target = self.folder/'guards-cache'/GUARD_REPOS[1]/PIN/'config.json'
+        warm = (self.folder/'warm.sh').read_text()
+        (self.folder/'warm.sh').write_text(warm.replace('import sys\n', 'import sys\nPath(%r).write_bytes(b"tampered weights!!!!!\\n")\n' % str(target), 1))
+        code, output, report = await self.invoke(CALIBRATE='0')
+        self.assertNotEqual(code, 0)
+        self.assertIn('FAIL guards: '+GUARD_REPOS[1]+' weights are missing or changed since preflight', output)
+        self.assertNotIn('"run"', (self.folder/'docker.jsonl').read_text())
+        self.assertNotIn('NODE READY', output)
+        self.assertEqual(report['state'], 'failed')
+
+    async def test_steady_resume_stays_steady_and_starts_the_guards(self):
+        (self.folder/'no-register').touch()
+        code, output, first = await self.invoke(CALIBRATE='0')
+        self.assertEqual(code, 1, output)
+        self.assertNotIn('guards_started', first)
+        (self.folder/'no-register').unlink()
+        with (self.folder/'cloudflared.log').open('a') as log:
+            log.write('INF Registered tunnel connection connIndex=0\n')
+        code, output, report = await self.invoke(CALIBRATE='0', RESUME=Path(first['report']).stem)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(report['mode'], 'steady')
+        self.assertEqual([r['name'] for r in report['gates']][len(first['gates']):],
+                         ['preflight', 'key', 'resume', 'tunnel', 'guards', 'handoff', 'key-leak'])
+        self.assertEqual(len(report['guards_started']), 2)
+        self.assertEqual(self.calls, [])
 
     async def test_rerun_reuses_verified_guards_without_downloading(self):
         code, output, _ = await self.invoke()
@@ -733,6 +795,16 @@ class PureNodeTests(unittest.TestCase):
         self.assertEqual(before, set((ROOT/'runs').glob('*')))
         self.assertIn('PLAN handoff', result.stdout)
 
+    def test_dry_run_plans_steady_by_default_and_the_suite_on_request(self):
+        def plan(*args, **env):
+            result = subprocess.run([str(ROOT/'scripts/node-run.sh'), *args], cwd=ROOT, capture_output=True, text=True,
+                                    env={'PATH': os.environ['PATH'], 'DRY_RUN': '1', **env})
+            return result.returncode, [line[5:] for line in result.stdout.splitlines() if line.startswith('PLAN ')]
+        self.assertEqual(plan(), (0, list(node_run.STEADY_GATES)))
+        self.assertEqual(plan('--calibrate'), (0, list(node_run.GATES)))
+        self.assertEqual(plan(CALIBRATE='1'), (0, list(node_run.GATES)))
+        self.assertEqual(plan('--bench')[0], 2)
+
     def test_key_reader_first_line_crlf_no_prompt(self):
         self.assertEqual(relay_config.read_classifier_key(io.StringIO(KEY+'\r\nignored\n')), KEY)
         for value in ('', '\n', '\r\n', '  \n', 'hello\0world'):
@@ -890,6 +962,7 @@ class PureNodeTests(unittest.TestCase):
                              'argv': ['docker', 'run', '--mem-fraction-static', '0.05']}
                             for n, m in (('a-shieldstral', GUARD_REPOS[0]), ('a-qwen', GUARD_REPOS[1])))
         obj.env, obj.resuming, obj.guard_plans, obj.record = {}, True, [kept, relaunched], {'measurements': {}}
+        obj.calibrate = True
         obj.reuse_guard = lambda plan: plan is kept
         obj.memory = Mock(return_value=[{'index': 0, 'used_mib': 0, 'free_mib': 1}])
         obj.processes, obj.save, obj.command = Mock(return_value=[]), Mock(), Mock()
@@ -963,7 +1036,7 @@ class PureNodeTests(unittest.TestCase):
                        'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'fixture',
                        'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN,
                        'LOADTEST_DURATION_SECONDS': '0.01', 'FIT_TOKENS_PER_STREAM': '32768',
-                       'TUNNEL_CONNECT_TIMEOUT': '2', **cloudflared_env(scratch)}
+                       'TUNNEL_CONNECT_TIMEOUT': '2', 'CALIBRATE': '1', **cloudflared_env(scratch)}
                 if mode == 'tunnel-echo': (scratch/'echo-token').touch()
                 if mode == 'tunnel-failure': (scratch/'fail-tunnel').touch()
                 if mode == 'kv': env['FAKE_SMALL_POOL'] = '1'

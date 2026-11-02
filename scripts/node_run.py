@@ -5,6 +5,7 @@ import csv
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import importlib
 import json
 import math
@@ -36,10 +37,18 @@ def nearest(path):
     return path
 
 
+# Default boot: download, warm, tunnel, start the guards, serve. Nothing is tested;
+# a guard that is not up yet makes the relay answer 503, so nothing is served unguarded.
+STEADY_LATE = ('tunnel', 'guards')
+STEADY_GATES = ('preflight', 'warm-timeout', 'key', 'warm', *STEADY_LATE, 'handoff', 'key-leak')
+# --calibrate (or CALIBRATE=1): the one-time suite. Run it for a new node type, guard
+# revision, engine image or serving config. Nothing triggers it automatically.
 LATE = ('guards', 'relay-safety', 'kv-pool', 'loadtest', 'fit', 'tunnel')
 GATES = ('preflight', 'warm-timeout', 'key', 'warm', *LATE, 'handoff', 'key-leak')
-# RESUME=<run id> proves the original engine is still the one serving, then reruns only LATE.
+# RESUME=<run id> proves the original engine is still the one serving, then reruns only the late gates.
 RESUME_GATES = ('preflight', 'key', 'resume', *LATE, 'handoff', 'key-leak')
+# What a calibration is valid for. Hashed into the report's fingerprint.
+SERVING_CONFIG = ('scripts/guards.py', 'config/sglang.env', 'config/model-manifest.json')
 RUN_ID = re.compile(r'node-run-[0-9]{8}T[0-9]{6}\.[0-9]{6}Z')
 PORTS = {8000: 'relay', 8001: 'engine', 8600: 'shieldstral guard', 8601: 'qwen guard'}
 # Inert benchmark inputs only: everyday text plus the drill canary string.
@@ -78,8 +87,9 @@ def provisioned(value, now):
 
 
 class NodeRun:
-    def __init__(self):
+    def __init__(self, calibrate=False):
         self.env = dict(os.environ)
+        self.calibrate = calibrate or self.env.get('CALIBRATE') == '1'
         for name in CREDENTIALS:
             self.env.pop(name, None)
             os.environ.pop(name, None)
@@ -96,17 +106,24 @@ class NodeRun:
         self.resuming = bool(self.env.get('RESUME'))
         if self.resuming:
             self.attach_record(self.env['RESUME'])
+            # A resume finishes the run it started as; older records are all calibration runs.
+            self.calibrate = self.calibrate or self.record.get('mode', 'calibrate') == 'calibrate'
+            self.record['mode'] = self.mode
             return
         self.id = 'node-run-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
         self.run = ROOT/'runs'/self.id
         self.path = ROOT/'runs'/(self.id+'.json')
         self.run.mkdir(parents=True, mode=0o700)
-        self.record = {'schema': 1, 'state': 'running', 'started_epoch': self.started,
+        self.record = {'schema': 1, 'mode': self.mode, 'state': 'running', 'started_epoch': self.started,
                        'gates': [], 'measurements': {}, 'decision': None,
                        'image_digest': None, 'git_sha': None,
                        'report': str(self.path), 'run_dir': str(self.run),
                        'tunnel': {'preflight': None, 'launched': False, 'pid': None,
                                   'status': 'not started', 'reason': None, 'waited_seconds': 0}}
+
+    @property
+    def mode(self):
+        return 'calibrate' if self.calibrate else 'steady'
 
     def attach_record(self, run_id):
         # The run id is a path component; accept only our own format.
@@ -329,6 +346,7 @@ class NodeRun:
             if self.guard_plans[0]['gpu'] >= expected:
                 raise GateFailure('GUARD_GPU is outside the GPU inventory')
             self.record['guards'] = self.guard_plans
+        self.record['fingerprint'] = self.fingerprint()
         # A resume keeps the engine's weights as they are, but the guard files still get checked.
         self.disk_check(guards_only=self.resuming)
         self.url = self.env.get('NODE_RUN_RELAY_URL', 'http://127.0.0.1:8000').rstrip('/')
@@ -346,6 +364,16 @@ class NodeRun:
         self.context = number(self.env, 'CONTEXT_LENGTH', 262144, integer=True)
         # Last in preflight, before warm: a mirror or HF problem shows up in minutes, not after 510 GB.
         self.stage_guards()
+
+    def fingerprint(self):
+        """What a calibration run was measured on. Recorded only; it never triggers anything."""
+        gpus = self.record['measurements']['gpus']
+        config = hashlib.sha256()
+        for name in SERVING_CONFIG:
+            config.update(name.encode()+b'\0'+(ROOT/name).read_bytes())
+        return {'node': f"{gpus[0]['name']} x{len(gpus)}", 'engine_image': self.image['image_digest'],
+                'guards': {p['model']: p['revision'] for p in self.guard_plans},
+                'serving_config': config.hexdigest()[:16]}
 
     def stage_guards(self):
         import guard_weights
@@ -593,9 +621,11 @@ class NodeRun:
         return round(1-(row['free_mib']-budget)/row['total_mib'], 4)
 
     def reuse_guard(self, plan):
-        """RESUME only: keep a guard container that is still running and healthy."""
+        """RESUME only: keep a guard container that is still running (and healthy, when calibrating)."""
         code, state = self.command(['docker', 'inspect', plan['name'], '--format', '{{.State.Running}}'], check=False)
         if code == 0 and state.strip() == 'true':
+            if not self.calibrate:
+                return True
             try:
                 asyncio.run(self.guards_healthy([plan]))
                 return True
@@ -605,33 +635,49 @@ class NodeRun:
             self.command(['docker', 'rm', '-f', plan['name']], timeout=60)
         return False
 
-    def guards(self):
+    def launchable(self):
+        """Guards to launch, after the cheap marker check that their weights are still the verified ones."""
         import guard_weights
-        before = self.memory()
-        processes_before = self.processes()
-        previous = (self.record.get('guard_bench') or {}).get('guards', {})
-        vram, reused = {}, []
-        # A resume keeps guards that are still running and healthy; their weights are already loaded.
-        launch = []
-        for plan in self.guard_plans:
-            if self.resuming and self.reuse_guard(plan):
-                reused.append(plan['name'])
-                vram[plan['name']] = previous.get(plan['name'], {}).get('vram_mib')
-            else:
-                launch.append(plan)
-        # Preflight staged these. Check again (cheap with markers) so nothing unverified loads.
+        launch = [p for p in self.guard_plans if not (self.resuming and self.reuse_guard(p))]
         for plan in launch:
             try:
                 guard_weights.verify(self.env, plan['model'], plan['revision'], plan['cache_dir'])
             except ValueError as exc:
                 raise GateFailure(str(exc)) from None
+        return launch
+
+    def launch_guard(self, plan):
+        argv = list(plan['argv'])
+        fraction = self.guard_fraction(plan)
+        argv[argv.index('--mem-fraction-static')+1] = str(fraction)
+        plan['effective_mem_fraction_static'] = fraction
+        self.save()
+        self.command(argv, timeout=120)
+
+    def start_guards(self):
+        """Steady state: load both guards and move on. Each sizes its memory against what is
+        free on its GPU, so the second starts once the first has loaded; nothing waits on the second."""
+        launch = self.launchable()
+        for i, plan in enumerate(launch):
+            self.launch_guard(plan)
+            if i < len(launch)-1:
+                asyncio.run(self.guards_healthy([plan]))
+        self.record['guards_started'] = [p['name'] for p in launch]
+        self.guard_vram = None  # Measured only when calibrating.
+
+    def guards(self):
+        if not self.calibrate:
+            return self.start_guards()
+        before = self.memory()
+        processes_before = self.processes()
+        previous = (self.record.get('guard_bench') or {}).get('guards', {})
+        # A resume keeps guards that are still running and healthy; their weights are already loaded.
+        launch = self.launchable()
+        reused = [p['name'] for p in self.guard_plans if p not in launch]
+        vram = {name: previous.get(name, {}).get('vram_mib') for name in reused}
         for plan in launch:
-            argv = list(plan['argv'])
-            fraction = self.guard_fraction(plan)
-            argv[argv.index('--mem-fraction-static')+1] = str(fraction)
-            plan['effective_mem_fraction_static'] = fraction; self.save()
             used = self.memory()[plan['gpu']]['used_mib']
-            self.command(argv, timeout=120)
+            self.launch_guard(plan)
             # One at a time, so the second guard sizes itself against what the first left.
             asyncio.run(self.guards_healthy([plan]))
             vram[plan['name']] = self.memory()[plan['gpu']]['used_mib']-used
@@ -824,7 +870,7 @@ class NodeRun:
                     raise GateFailure('tunnel registered no edge connection within TUNNEL_CONNECT_TIMEOUT')
                 time.sleep(0.5)
             result['registered_seconds'] = time.monotonic()-started
-            if not asyncio.run(node_tunnel.reachable(self.tunnel_url, until, private=self.private)):
+            if self.calibrate and not asyncio.run(node_tunnel.reachable(self.tunnel_url, until, private=self.private)):
                 raise GateFailure('tunnel connected but the public URL never reached the relay')
         except GateFailure as exc:
             result.update(status='not up', reason=str(exc))
@@ -846,8 +892,12 @@ class NodeRun:
         else:
             early = (('preflight', self.preflight), ('warm-timeout', self.warm_timeout),
                      ('key', self.read_key), ('warm', self.warm))
-        late = (('guards', self.guards), ('relay-safety', lambda: asyncio.run(self.relay_safety())),
-                ('kv-pool', self.pool), ('loadtest', self.loadtest), ('fit', self.fit), ('tunnel', self.tunnel))
+        if self.calibrate:
+            late = (('guards', self.guards), ('relay-safety', lambda: asyncio.run(self.relay_safety())),
+                    ('kv-pool', self.pool), ('loadtest', self.loadtest), ('fit', self.fit), ('tunnel', self.tunnel))
+        else:
+            late = (('tunnel', self.tunnel), ('guards', self.guards))
+        self.say('MODE '+self.mode)
         for name, action in early+late:
             if getattr(self, 'private', False) and name in ('guards', 'relay-safety', 'loadtest', 'fit'):
                 self.say(f'SKIP {name} (PRIVATE_UNGUARDED=1: no CSAM block, private key only)')
@@ -855,12 +905,14 @@ class NodeRun:
             with self.gate(name):
                 action()
         with self.gate('handoff'):
+            if not self.calibrate:
+                self.record.update(decision=self.current, decision_reason='steady: warm effective concurrency, not load-tested')
             self.record.update(state='ready', ended_epoch=time.time())
             self.save()
             self.check_key_leak()
         # The gate writes its final timing before the final literal check.
         self.check_key_leak()
-        self.say(f'NODE READY FOR DRILL relay={self.public_url} local=http://127.0.0.1:8000 '
+        self.say(f'NODE READY FOR DRILL mode={self.mode} relay={self.public_url} local=http://127.0.0.1:8000 '
                  f'fit={self.current} p99_ms={self.load.p99_ms if self.load else float("nan"):.2f} '
                  f'guard_vram_mib={getattr(self, "guard_vram", 0)} report={self.path}')
         with self.gate('key-leak', check_deadline=False):
@@ -875,7 +927,7 @@ class NodeRun:
         warmed = any(r['name'] in ('warm', 'resume') and r['status'] == 'PASS' for r in gates)
         failed = [r['name'] for r in gates if r['status'] == 'FAIL']
         # warm.sh removes its own engine when the single 64 relaunch fails.
-        if not warmed or not failed or failed[-1] not in (*LATE, 'handoff', 'kv-pool-64', 'relay-safety-64', 'loadtest-64'):
+        if not warmed or not failed or failed[-1] not in (*LATE, *STEADY_LATE, 'handoff', 'kv-pool-64', 'relay-safety-64', 'loadtest-64'):
             return
         command = f'RESUME={self.id} ./scripts/node-run.sh < /path/to/classifier-key'
         self.record['resume_command'] = command
@@ -934,19 +986,28 @@ def percentile(values, fraction):
     return round(values[max(0, math.ceil(fraction*len(values))-1)], 2)
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv not in ([], ['--calibrate']):
+        print('usage: node-run.sh [--calibrate]', flush=True)
+        return 2
+    calibrate = argv == ['--calibrate'] or os.environ.get('CALIBRATE') == '1'
     if os.environ.get('DRY_RUN') == '1':
         print('DRY RUN: no env files, stdin reads, probes, directories, containers or tunnels.')
-        for name in GATES:
+        print('MODE '+('calibrate' if calibrate else 'steady'))
+        for name in GATES if calibrate else STEADY_GATES:
             print('PLAN '+name)
-        print('Plan: pinned TP8 warm; two pinned loopback guards, staged and verified in preflight; 130 rps; 128 or one fallback to 64.')
+        if calibrate:
+            print('Plan: pinned TP8 warm; two pinned loopback guards, staged and verified in preflight; 130 rps; 128 or one fallback to 64.')
+        else:
+            print('Plan: pinned TP8 warm; tunnel; load both guards from verified weights; no benchmark, canary, load test or fit.')
         print('Plan: preflight cleans stale containers and our relay, stages a verified cloudflared; tunnel is a hard gate before handoff.')
         print('Plan: a late failure keeps the engine up and prints RESUME=<run id> to rerun only the late gates.')
         print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; no automatic restarts.')
         return 0
     os.umask(0o077)
     try:
-        runner = NodeRun()
+        runner = NodeRun(calibrate)
     except GateFailure as exc:
         print('FAIL resume: '+str(exc), flush=True)
         return 1

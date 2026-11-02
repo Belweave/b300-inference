@@ -609,6 +609,27 @@ class OutputEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.post(client, safety.CANARY, 'output'),
                          (200, {'flag': True, 'score': 1.0, 'model': self.config.qwen_model_id}))
 
+    async def test_a_guard_that_is_not_up_blocks_requests(self):
+        """The steady boot does not wait for the guards; until both answer, the relay refuses."""
+        async def shieldstral(request):
+            return web.json_response(logprobs(('no', -0.01), ('yes', -6.0)))
+        app = web.Application()
+        app.router.add_post('/v1/chat/completions', shieldstral)
+        guard = TestServer(app, host='127.0.0.1')
+        await guard.start_server()
+        self.addAsyncCleanup(guard.close)
+        closed = TestServer(web.Application(), host='127.0.0.1')
+        await closed.start_server()
+        down = str(closed.make_url('')).rstrip('/')
+        await closed.close()  # Nothing listens here now, like a guard still loading.
+        config = replace(self.config, url=str(guard.make_url('')).rstrip('/'), qwen_url=down, timeout_seconds=1)
+        app = sse_relay.make_app('http://127.0.0.1:1', safety_config=config)
+        async with TestClient(TestServer(app, host='127.0.0.1', handler_cancellation=True)) as client:
+            self.assertEqual((await self.post(client, phase='input'))[0], 200)
+            self.assertEqual(await self.post(client, phase='output'), (503, {'error': 'classifier unavailable'}))
+            await guard.close()
+            self.assertEqual(await self.post(client, phase='input'), (503, {'error': 'classifier unavailable'}))
+
     async def test_real_adapters_share_one_session_and_one_semaphore(self):
         config = replace(self.config, max_inflight=1, classifier_key='test-only-key')
         app = sse_relay.make_app('http://127.0.0.1:1', safety_config=config)
