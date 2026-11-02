@@ -76,7 +76,10 @@ assert all('eyJ'+'A'*60 not in arg for arg in sys.argv)
 state = Path(os.environ['FAKE_STATE'])
 with (state/'docker.jsonl').open('a') as out:
     out.write(json.dumps(sys.argv[1:])+'\n')
-if sys.argv[1] == 'run':
+if sys.argv[1] == 'ps':
+    path = state/'containers'
+    print(path.read_text() if path.exists() else '')
+elif sys.argv[1] == 'run':
     assert '-d' in sys.argv
     assert '--restart' not in sys.argv
     assert sys.argv[sys.argv.index('--host')+1] == '127.0.0.1'
@@ -84,8 +87,14 @@ if sys.argv[1] == 'run':
     assert any('@sha256:' in arg for arg in sys.argv)
     (state/'guards').touch()
     print('fake-container')
-elif sys.argv[1] == 'inspect':
+elif sys.argv[1] == 'inspect' and '--format' in sys.argv:
     print('true')
+elif sys.argv[1] == 'inspect':
+    # The engine container, as warm.sh left it.
+    path = state/'inspect.json'
+    if not path.exists():
+        sys.exit(1)
+    print(path.read_text())
 '''
 
 WARM = r'''import json
@@ -119,14 +128,21 @@ log = f'max_total_num_tokens={tokens}, max_running_requests={running}\n'
 if os.environ.get('FAKE_MISSING_POOL') == '1':
     log = 'hello world\n'
 (base/'engine.log').write_text(log)
-ready = {'state': 'ready', 'timing_file': str(path), 'max_running_requests_effective': limit}
+revision = json.loads(Path('config/model-manifest.json').read_text())['model']['revision']
+ready = {'state': 'ready', 'timing_file': str(path), 'max_running_requests_effective': limit,
+         'container': 'b300-warm-fixture', 'revision': revision}
 path.write_text(json.dumps({'state': 'ready', 'config': {'MAX_RUNNING_REQUESTS': str(limit)},
-                            'image_ref': os.environ['ENGINE_IMAGE'], 'concurrency': {'effective': limit}}))
+                            'image_ref': os.environ['ENGINE_IMAGE'], 'image_id': 'sha256:'+'b'*64,
+                            'concurrency': {'effective': limit}}))
+(state/'inspect.json').write_text(json.dumps([{
+    'State': {'Running': True}, 'Image': 'sha256:'+'b'*64,
+    'Mounts': [{'Destination': '/weights', 'Source': str(Path(os.environ['WEIGHTS_DIR']).absolute())}]}]))
 print('READY '+json.dumps(ready))
 '''
 
 TUNNEL = r'''import os
 from pathlib import Path
+import subprocess
 import sys
 assert os.environ['CF_TUNNEL_TOKEN'] == 'eyJ'+'A'*60
 assert all(name not in os.environ for name in ('SAFETY_CLASSIFIER_KEY', 'INFER_UPSTREAM_KEY', 'TUNNEL_TOKEN'))
@@ -140,8 +156,23 @@ if (home/'echo-token').exists():
 if (home/'fail-tunnel').exists():
     sys.exit(1)
 (home/'tunnel-started').touch()
-print('tunnel started, pid 4321')
+# A real detached child named cloudflared (a copy of sleep), like nohup in Netops' helper.
+child = subprocess.Popen([str(home/'cloudflared'), '20'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+if not (home/'no-register').exists():
+    with (home/'cloudflared.log').open('a') as log:
+        log.write('INF Registered tunnel connection connIndex=0 location=fixture\n')
+print(f'tunnel started, pid {child.pid}')
 '''
+
+
+def cloudflared_env(home):
+    """A verified stand-in binary, so preflight staging never touches the network."""
+    binary = home/'cloudflared'
+    if not binary.exists():
+        shutil.copy(shutil.which('sleep'), binary)
+    return {'CLOUDFLARED_BIN': str(binary), 'CLOUDFLARED_SHA256': node_tunnel.sha256(binary),
+            'CLOUDFLARED_LOG': str(home/'cloudflared.log')}
 
 
 def tunnel_fixture(home):
@@ -168,6 +199,8 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         app.router.add_get('/health', self.health)
         app.router.add_post('/v1/safety/csam', self.classify)
+        app.router.add_post('/v1/chat/completions', self.guard)
+        app.router.add_get('/v1/models', self.models)
         self.server = TestServer(app, host='127.0.0.1', handler_cancellation=True)
         await self.server.start_server()
         self.addAsyncCleanup(self.server.close)
@@ -179,7 +212,8 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.env = {'PATH': str(self.folder)+':'+os.environ['PATH'], 'HOME': str(self.folder), 'PYTHONPATH': USER_SITE,
                     'NODE_ENV_FILE': str(tunnel_fixture(self.folder)), 'NODE_RUN_TESTING': '1',
                     'NODE_RUN_WARM_CMD': str(self.folder/'warm.sh'), 'NODE_RUN_RELAY_URL': self.url,
-                    'NODE_RUN_TUNNEL_PUBLIC_URL': self.url, 'TUNNEL_WAIT_SECONDS': '0.15',
+                    'NODE_RUN_TUNNEL_PUBLIC_URL': self.url, 'TUNNEL_CONNECT_TIMEOUT': '1.5',
+                    'NODE_RUN_ENGINE_HEALTH_URL': self.url, **cloudflared_env(self.folder),
                     'NODE_RUN_GUARD_HEALTH_URL': self.url, 'FAKE_STATE': str(self.folder),
                     'WEIGHTS_DIR': str(self.folder/'weights'), 'GUARD_WEIGHTS_DIR': str(self.folder/'guards-cache'),
                     'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'upstream-fixture',
@@ -194,7 +228,21 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
                 path.unlink(missing_ok=True)
 
     async def health(self, request):
-        return web.Response(text='hello world', status=503 if self.mode == 'guard-down' else 200)
+        return web.Response(text='hello world', status=503 if self.mode in ('guard-down', 'engine-down') else 200)
+
+    async def models(self, request):
+        # The engine behind a private relay: no key, no models.
+        return web.json_response({'error': 'Unauthorized'}, status=401)
+
+    async def guard(self, request):
+        """Mocked guard verdicts only: Shieldstral asks for logprobs, Qwen3Guard for text."""
+        body = await request.json()
+        if self.mode == 'guard-garbage':
+            return web.json_response({}, status=500)
+        if body.get('logprobs'):
+            return web.json_response({'choices': [{'logprobs': {'content': [{'top_logprobs': [
+                {'token': 'no', 'logprob': -0.01}, {'token': 'yes', 'logprob': -6.0}]}]}}]})
+        return web.json_response({'choices': [{'message': {'content': 'Safety: Safe\nCategories: None'}}]})
 
     async def classify(self, request):
         if request.headers.get('Authorization') != 'Bearer '+KEY:
@@ -250,12 +298,23 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('fit=128 ', output)
         self.assertIn('guard_vram_mib=20000 ', output)
         self.assertIn('TUNNEL UP url='+self.url, output)
-        self.assertLess(output.index('NODE READY FOR DRILL'), output.index('TUNNEL UP'))
-        self.assertLess(output.index('TUNNEL UP'), output.index('PASS key-leak'))
+        self.assertLess(output.index('TUNNEL UP'), output.index('NODE READY FOR DRILL'))
+        self.assertLess(output.index('NODE READY FOR DRILL'), output.index('PASS key-leak'))
         self.assertLess(output.index('PASS key-leak'), output.index('TEARDOWN BY'))
         self.assertEqual(report['tunnel']['status'], 'up')
-        self.assertEqual(report['tunnel']['pid'], 4321)
+        self.assertIsInstance(report['tunnel']['pid'], int)
         self.assertTrue(report['tunnel']['launched'])
+        self.assertEqual(report['tunnel']['binary']['source'], 'cached')
+        bench = report['guard_bench']
+        self.assertEqual(sorted(bench['guards']), sorted(plan['name'] for plan in report['guards']))
+        for row in bench['guards'].values():
+            self.assertEqual(row['requests'], 8*len(node_run.BENCH_TEXTS))
+            self.assertLessEqual(row['p50_ms'], row['p99_ms'])
+            self.assertEqual(row['benign_flagged'], 0)
+            self.assertIn('vram_mib', row)
+        self.assertEqual(bench['canary_flag'], {'input': True, 'output': True})
+        self.assertIn('GUARD BENCH ', output)
+        self.assertEqual(report['cleanup'], {'containers': [], 'relay_pids': []})
         self.assertTrue(self.tunnel_calls)
         for headers, body in self.tunnel_calls:
             self.assertNotIn('Authorization', headers)
@@ -318,8 +377,8 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         ready = next(i for i, line in enumerate(lines) if line.startswith('NODE READY FOR DRILL '))
         up = lines.index('TUNNEL UP url='+self.url)
         teardown = next(i for i, line in enumerate(lines) if line.startswith('TEARDOWN BY'))
-        self.assertLess(ready, up)
-        self.assertLess(up, teardown)
+        self.assertLess(up, ready)
+        self.assertLess(ready, teardown)
         self.assertNotIn('TUNNEL NOT STARTED', output)
         self.assertEqual(report['decision'], 128)
         self.assertEqual(report['state'], 'ready')
@@ -327,16 +386,26 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report['tunnel']['reason'], None)
         self.assertNotIn(TUNNEL_TOKEN, output+json.dumps(report))
 
-    async def test_tunnel_timeout_and_launch_failure_leave_fit_green(self):
-        for mode in ('tunnel-530', 'launch-failure'):
+    async def test_tunnel_is_a_hard_gate_and_keeps_the_engine(self):
+        for mode, reason in (('tunnel-530', 'never reached the relay'), ('no-register', 'registered no edge connection'),
+                             ('launch-failure', 'tunnel helper failed')):
             self.mode = mode
             if mode == 'launch-failure': (self.folder/'fail-tunnel').touch()
+            if mode == 'no-register': (self.folder/'no-register').touch()
             code, output, report = await self.invoke()
-            self.assertEqual(code, 0, output)
+            self.assertEqual(code, 1, output)
+            self.assertIn('FAIL tunnel: ', output)
+            self.assertIn(reason, report['tunnel']['reason'])
             self.assertEqual(report['decision'], 128)
-            self.assertEqual(report['state'], 'ready')
-            self.assertIn('TUNNEL NOT STARTED reason='+('timeout' if mode == 'tunnel-530' else 'launch failed'), output)
-            self.assertEqual(report['tunnel']['launched'], mode == 'tunnel-530')
+            self.assertEqual(report['state'], 'failed')
+            self.assertNotIn('NODE READY FOR DRILL', output)
+            self.assertIn('ENGINE KEPT', output)
+            self.assertIn(f"RESUME={report['report'].rsplit('/', 1)[1][:-5]} ./scripts/node-run.sh", output)
+            self.assertEqual(report['tunnel']['launched'], mode != 'launch-failure')
+            docker = (self.folder/'docker.jsonl').read_text()
+            self.assertNotIn('b300-warm-fixture', docker)
+            for name in ('fail-tunnel', 'no-register'):
+                (self.folder/name).unlink(missing_ok=True)
 
     async def test_tunnel_stdout_and_stderr_are_redacted(self):
         (self.folder/'echo-token').touch()
@@ -452,7 +521,111 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         config.chmod(0o600)
         code, output, _ = await self.invoke(NODE_ENV_FILE=str(config), ENGINE_PORT=str(self.server.port))
         self.assertNotEqual(code, 0)
-        self.assertIn('is occupied', output)
+        self.assertIn(f'port {self.server.port} (engine) is held by a process that is not ours', output)
+
+
+    async def first_run_fails_at_tunnel(self):
+        (self.folder/'no-register').touch()
+        code, output, report = await self.invoke()
+        self.assertEqual(code, 1, output)
+        (self.folder/'no-register').unlink()
+        return Path(report['report']).stem, report
+
+    async def test_rehearsal_guards_relay_safety_and_resume(self):
+        """make dry-run: a late failure keeps the engine, RESUME reruns only the late gates."""
+        run_id, first = await self.first_run_fails_at_tunnel()
+        self.assertEqual(first['resume_command'], f'RESUME={run_id} ./scripts/node-run.sh < /path/to/classifier-key')
+        before_calls = len(self.calls)
+        # cloudflared connected after the first attempt gave up.
+        with (self.folder/'cloudflared.log').open('a') as log:
+            log.write('INF Registered tunnel connection connIndex=0\n')
+        docker_before = (self.folder/'docker.jsonl').read_text().splitlines()
+        code, output, report = await self.invoke(RESUME=run_id)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(report['state'], 'ready')
+        resumed = [r['name'] for r in report['gates']][len(first['gates']):]
+        self.assertEqual(resumed, list(node_run.RESUME_GATES))
+        self.assertTrue(all(r['status'] == 'PASS' for r in report['gates'][len(first['gates']):]))
+        # No re-warm, no new guard containers, no cleanup of what is running.
+        self.assertEqual(len((self.folder/'warm.jsonl').read_text().splitlines()), 1)
+        docker = [json.loads(line) for line in (self.folder/'docker.jsonl').read_text().splitlines()[len(docker_before):]]
+        self.assertFalse([args for args in docker if args[0] in ('run', 'rm', 'ps')])
+        self.assertEqual(sorted(report['measurements']['guard_memory']['reused']),
+                         sorted(plan['name'] for plan in report['guards']))
+        self.assertTrue(report['tunnel']['reused'])
+        self.assertEqual(report['resumes'][0]['container'], 'b300-warm-fixture')
+        self.assertGreater(len(self.calls), before_calls)  # relay-safety and loadtest ran again
+        self.assertIn('NODE READY FOR DRILL', output)
+        self.assertEqual(report['teardown_deadline_epoch'], first['teardown_deadline_epoch'])
+
+    async def test_resume_fails_closed_on_any_mismatch(self):
+        run_id, first = await self.first_run_fails_at_tunnel()
+        inspect = self.folder/'inspect.json'
+        good = json.loads(inspect.read_text())
+        warm_report = Path(first['warm_runs'][0]['ready']['timing_file'])
+        cases = (
+            ('missing', lambda: inspect.unlink(), 'no longer exists'),
+            ('stopped', lambda: inspect.write_text(json.dumps([{**good[0], 'State': {'Running': False}}])), 'is not running'),
+            ('image', lambda: inspect.write_text(json.dumps([{**good[0], 'Image': 'sha256:'+'c'*64}])), 'different image'),
+            ('weights', lambda: inspect.write_text(json.dumps([{**good[0], 'Mounts': [
+                {'Destination': '/weights', 'Source': '/elsewhere'}]}])), 'different weights directory'),
+            ('health', lambda: setattr(self, 'mode', 'engine-down'), 'did not return 200'),
+        )
+        for name, breaks, message in cases:
+            with self.subTest(case=name):
+                inspect.write_text(json.dumps(good))
+                self.mode = ''
+                breaks()
+                code, output, _ = await self.invoke(RESUME=run_id)
+                self.assertEqual(code, 1, output)
+                self.assertIn('FAIL resume: ', output)
+                self.assertIn(message, output)
+                self.assertNotIn('PASS guards', output)
+        self.mode = ''
+        inspect.write_text(json.dumps(good))
+        record = json.loads(Path(first['report']).read_text())
+        record['warm_runs'][0]['ready']['revision'] = 'f'*40
+        Path(first['report']).write_text(json.dumps(record))
+        code, output, _ = await self.invoke(RESUME=run_id)
+        self.assertIn('revision differs', output)
+        warm = json.loads(warm_report.read_text())
+        warm['image_ref'] = 'other@sha256:'+'d'*64
+        warm_report.write_text(json.dumps(warm))
+        code, output, _ = await self.invoke(RESUME=run_id)
+        self.assertIn('does not match the pinned image', output)
+        self.assertEqual(len((self.folder/'warm.jsonl').read_text().splitlines()), 1)
+
+    async def test_resume_rejects_unknown_or_malformed_ids(self):
+        for run_id in ('../etc', 'node-run-20261101T000000.000000Z'):
+            process = await asyncio.create_subprocess_exec(str(ROOT/'scripts/node-run.sh'), cwd=ROOT,
+                        env={**self.env, 'RESUME': run_id}, stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, _ = await asyncio.wait_for(process.communicate(KEY.encode()+b'\n'), 10)
+            self.assertEqual(process.returncode, 1)
+            self.assertIn('FAIL resume: ', stdout.decode())
+        self.assertFalse((self.folder/'warm.jsonl').exists())
+
+    async def test_preflight_removes_stale_containers_and_our_relay(self):
+        (self.folder/'containers').write_text('b300-warm-old\nnode-run-old-qwen\nsomeone-else\n')
+        relay = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', str(ROOT/'scripts/sse_relay.py')])
+        self.addCleanup(relay.kill)
+        code, output, report = await self.invoke()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(report['cleanup']['containers'], ['b300-warm-old', 'node-run-old-qwen'])
+        self.assertEqual(report['cleanup']['relay_pids'], [relay.pid])
+        self.assertIsNotNone(relay.wait(timeout=5))
+        docker = [json.loads(line) for line in (self.folder/'docker.jsonl').read_text().splitlines()]
+        self.assertIn(['rm', '-f', 'b300-warm-old', 'node-run-old-qwen'], docker)
+        self.assertLess(docker.index(['rm', '-f', 'b300-warm-old', 'node-run-old-qwen']),
+                        next(i for i, args in enumerate(docker) if args[0] == 'run'))
+        self.assertIn('CLEANUP removed 2 stale container(s) and stopped 1 old relay(s)', output)
+
+    async def test_guard_bench_failure_fails_guards_and_keeps_engine(self):
+        self.mode = 'guard-garbage'
+        code, output, report = await self.invoke()
+        self.assertEqual(code, 1, output)
+        self.assertIn('FAIL guards: guard benchmark: a guard did not return a valid score', output)
+        self.assertIn('ENGINE KEPT', output)
 
 
 class PureNodeTests(unittest.TestCase):
@@ -643,7 +816,8 @@ class PureNodeTests(unittest.TestCase):
                        'WEIGHTS_DIR': str(scratch/'weights'), 'GUARD_WEIGHTS_DIR': str(scratch/'cache'),
                        'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'fixture',
                        'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN,
-                       'LOADTEST_DURATION_SECONDS': '0.01', 'FIT_TOKENS_PER_STREAM': '32768'}
+                       'LOADTEST_DURATION_SECONDS': '0.01', 'FIT_TOKENS_PER_STREAM': '32768',
+                       'TUNNEL_CONNECT_TIMEOUT': '2', **cloudflared_env(scratch)}
                 if mode == 'tunnel-echo': (scratch/'echo-token').touch()
                 if mode == 'tunnel-failure': (scratch/'fail-tunnel').touch()
                 if mode == 'kv': env['FAKE_SMALL_POOL'] = '1'
@@ -666,13 +840,17 @@ class PureNodeTests(unittest.TestCase):
 
                     obj.preflight = preflight
                     obj.guards_healthy, obj.relay_safety = AsyncMock(), AsyncMock()
+                    obj.guard_bench = AsyncMock(return_value={})
                     output = io.StringIO()
                     with redirect_stdout(output), patch('sys.stdin', io.StringIO('' if mode == 'empty' else KEY+'\n')), \
                          patch('safety_loadtest.run_live_load_test', side_effect=measured), \
                          patch('node_tunnel.reachable', new=AsyncMock(return_value=mode != 'tunnel-timeout')):
-                        if mode in ('seven', 'empty', 'pin'):
+                        if mode in ('seven', 'empty', 'pin', 'tunnel-timeout', 'tunnel-failure'):
                             with self.assertRaises(node_run.GateFailure):
                                 obj.run_all()
+                            if mode.startswith('tunnel'):
+                                self.assertIn('FAIL tunnel: '+('tunnel connected but' if mode == 'tunnel-timeout'
+                                                               else 'tunnel helper failed'), output.getvalue())
                         else:
                             obj.run_all()
                             self.assertEqual(obj.record['decision'], 64 if mode in ('kv', 'rank', 'latency') else 128)
@@ -680,11 +858,7 @@ class PureNodeTests(unittest.TestCase):
                             self.assertEqual(obj.record['warm_timeout_seconds'],
                                              3600 if mode != 'cap' else obj.record['warm_runs'][0]['warm_timeout_seconds'])
                             if mode == 'cap': self.assertLess(obj.record['warm_timeout_seconds'], 500)
-                            if mode in ('tunnel-timeout', 'tunnel-failure'):
-                                self.assertIn('TUNNEL NOT STARTED reason='+
-                                              ('timeout' if mode == 'tunnel-timeout' else 'launch failed'), output.getvalue())
-                            else:
-                                self.assertIn('TUNNEL UP url=', output.getvalue())
+                            self.assertIn('TUNNEL UP url=', output.getvalue())
                             if mode == 'tunnel-echo':
                                 self.assertEqual((obj.run/'tunnel.log').read_text().count('[REDACTED]'), 2)
                     self.assertFalse(KEY in output.getvalue(), 'key leaked to stdout')
@@ -744,27 +918,113 @@ class PureNodeTests(unittest.TestCase):
                         if path.is_dir(): shutil.rmtree(path)
                         else: path.unlink()
 
-    def test_tunnel_dependencies_and_cached_checksum(self):
-        import hashlib
+    def test_tunnel_needs_only_sha256sum(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as folder:
-            home = Path(folder)
-            config = tunnel_fixture(home)
+            config = tunnel_fixture(Path(folder))
             env = {'HOME': folder, 'NODE_ENV_FILE': str(config), 'PATH': folder}
-            vendor = ROOT/'vendor/infer-gateway/node-tunnel.sh'
-            with patch('node_tunnel.cached_binary_verified', return_value=False):
-                result = node_tunnel.prerequisites(env, TUNNEL_TOKEN, vendor)
-                self.assertEqual(result['status'], 'FAIL')
-                self.assertEqual(result['missing_tools'], ['curl', 'sha256sum'])
-            with patch('node_tunnel.cached_binary_verified', return_value=True):
-                self.assertEqual(node_tunnel.prerequisites(env, TUNNEL_TOKEN, vendor)['status'], 'PASS')
-            binary, helper = home/'cloudflared', home/'pins.sh'
-            binary.write_bytes(b'hello world')
-            binary.chmod(0o700)
-            helper.write_text('ARCH=amd64; SHA='+hashlib.sha256(b'hello world').hexdigest())
-            with patch('node_tunnel.platform.machine', return_value='x86_64'):
-                self.assertTrue(node_tunnel.cached_binary_verified(helper, binary))
-                binary.write_bytes(b'hello world\n')
-                self.assertFalse(node_tunnel.cached_binary_verified(helper, binary))
+            result = node_tunnel.prerequisites(env, TUNNEL_TOKEN)
+            self.assertEqual((result['status'], result['missing_tools']), ('FAIL', ['sha256sum']))
+            env['PATH'] = os.environ['PATH']
+            self.assertEqual(node_tunnel.prerequisites(env, TUNNEL_TOKEN)['status'], 'PASS')
+
+    def test_cloudflared_comes_from_the_mirror_then_github_and_is_always_verified(self):
+        import hashlib
+        import http.server
+        import threading
+        good, bad = b'pinned cloudflared bytes', b'tampered bytes'
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append((self.path, self.headers.get('X-Mirror-Key')))
+                routes = getattr(self.server, 'routes')
+                if self.path not in routes:
+                    self.send_response(404); self.end_headers(); return
+                status, body = routes[self.path]
+                self.send_response(status)
+                if status == 302:
+                    self.send_header('Location', '/elsewhere')
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = f'http://127.0.0.1:{server.server_port}'
+        mirror_path = '/mirror/'+node_tunnel.MIRROR_OBJECT
+        self.assertEqual(node_tunnel.MIRROR_OBJECT, 'tools/cloudflared/2026.10.7/cloudflared-linux-amd64')
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder, \
+             patch('node_tunnel.platform.machine', return_value='x86_64'):
+            dest = Path(folder)/'cloudflared'
+            env = {'NODE_RUN_TESTING': '1', 'CLOUDFLARED_BIN': str(dest), 'MIRROR_URL': base+'/mirror',
+                   'MIRROR_AUTH_HEADER': 'X-Mirror-Key: fixture-only', 'CLOUDFLARED_GITHUB_URL': base+'/github',
+                   'CLOUDFLARED_SHA256': hashlib.sha256(good).hexdigest()}
+            for routes, source, failed in (
+                ({mirror_path: (200, good)}, 'mirror', []),
+                ({mirror_path: (200, bad), '/github': (200, good)}, 'github', ['mirror: checksum mismatch']),
+                ({mirror_path: (302, b''), '/elsewhere': (200, good), '/github': (200, good)}, 'github',
+                 ['mirror: download failed']),
+                ({'/github': (200, good)}, 'github', ['mirror: download failed']),
+            ):
+                dest.unlink(missing_ok=True)
+                server.routes, seen[:] = routes, []
+                result = node_tunnel.stage_binary(env, timeout=5)
+                self.assertEqual((result['source'], result['failed']), (source, failed))
+                self.assertEqual(dest.read_bytes(), good)
+                self.assertTrue(os.access(dest, os.X_OK))
+                self.assertEqual(seen[0], (mirror_path, 'fixture-only'))
+                # The mirror credential never follows a redirect or goes to GitHub.
+                self.assertTrue(all(key is None for path, key in seen[1:]))
+            self.assertEqual(node_tunnel.stage_binary(env)['source'], 'cached')
+            dest.write_bytes(bad)
+            server.routes = {mirror_path: (200, bad), '/github': (200, bad)}
+            with self.assertRaises(ValueError) as caught:
+                node_tunnel.stage_binary(env, timeout=5)
+            self.assertIn('no verified cloudflared', str(caught.exception))
+            self.assertNotIn('fixture-only', str(caught.exception))
+            self.assertNotIn('127.0.0.1', str(caught.exception))
+            self.assertEqual(dest.read_bytes(), bad)  # not replaced, and not executed by us
+            self.assertEqual(list(Path(folder).glob('*.new')), [])
+            with self.assertRaises(ValueError):
+                node_tunnel.stage_binary({**env, 'CLOUDFLARED_SHA256': 'nope'})
+        self.assertEqual(node_tunnel.CLOUDFLARED_SHA256,
+                         '1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872')
+
+    def test_registered_reads_only_new_log_lines(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            log = Path(folder)/'cloudflared.log'
+            self.assertFalse(node_tunnel.registered(log, 0))
+            log.write_bytes(b'INF Registered tunnel connection connIndex=0\n')
+            offset = node_tunnel.log_size(log)
+            self.assertTrue(node_tunnel.registered(log, 0))
+            self.assertFalse(node_tunnel.registered(log, offset))
+            with log.open('ab') as stream:
+                stream.write(b'x'*(1024*1024-10)+b'INF Registered tunnel connection connIndex=1\n')
+            self.assertTrue(node_tunnel.registered(log, offset))
+
+    def test_percentile_nearest_rank(self):
+        self.assertIsNone(node_run.percentile([], 0.5))
+        values = sorted(float(i) for i in range(1, 101))
+        self.assertEqual((node_run.percentile(values, 0.5), node_run.percentile(values, 0.99)), (50.0, 99.0))
+        self.assertEqual(node_run.percentile([7.0], 0.99), 7.0)
+
+    def test_private_tunnel_probe_accepts_an_engine_401_on_models(self):
+        for status, expected in ((401, True), (404, False), (530, False)):
+            response = Mock(status=status)
+            request = AsyncMock()
+            request.__aenter__.return_value = response
+            session = Mock(get=Mock(return_value=request))
+            context = AsyncMock()
+            context.__aenter__.return_value = session
+            with patch('aiohttp.ClientSession', return_value=context), \
+                 patch('node_tunnel.time', Mock(monotonic=Mock(side_effect=itertools.chain([0], itertools.repeat(2))))), \
+                 patch('node_tunnel.asyncio.sleep', new=AsyncMock()):
+                self.assertEqual(asyncio.run(node_tunnel.reachable('https://example.invalid', 1, private=True)), expected)
+            self.assertEqual(session.get.call_args.args[0], 'https://example.invalid/v1/models')
+            self.assertNotIn('headers', session.get.call_args.kwargs)
 
     def test_tunnel_probe_requires_relay_401_without_credentials(self):
         for status, payload, expected in ((401, {'error': 'unauthorized'}, True),

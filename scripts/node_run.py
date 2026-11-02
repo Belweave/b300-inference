@@ -2,7 +2,7 @@
 import asyncio
 from contextlib import contextmanager
 import csv
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import fcntl
 import importlib
@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -24,8 +25,15 @@ from serve_plan import front_port, image_reference, require_pinned
 from warm_logic import concurrency_fit, parse_pool, tunnel_slot
 
 ROOT = Path(__file__).resolve().parents[1]
-GATES = ('preflight', 'warm-timeout', 'key', 'warm', 'guards', 'relay-safety',
-         'kv-pool', 'loadtest', 'fit', 'handoff', 'key-leak')
+LATE = ('guards', 'relay-safety', 'kv-pool', 'loadtest', 'fit', 'tunnel')
+GATES = ('preflight', 'warm-timeout', 'key', 'warm', *LATE, 'handoff', 'key-leak')
+# RESUME=<run id> proves the original engine is still the one serving, then reruns only LATE.
+RESUME_GATES = ('preflight', 'key', 'resume', *LATE, 'handoff', 'key-leak')
+RUN_ID = re.compile(r'node-run-[0-9]{8}T[0-9]{6}\.[0-9]{6}Z')
+PORTS = {8000: 'relay', 8001: 'engine', 8600: 'shieldstral guard', 8601: 'qwen guard'}
+# Inert benchmark inputs only: everyday text plus the drill canary string.
+BENCH_TEXTS = ('hello world', 'What is the capital of France?', 'Write a haiku about the ocean.',
+               'Summarize: the team meeting moved to Tuesday at noon.')
 CREDENTIALS = ('SAFETY_CLASSIFIER_KEY', 'CF_TUNNEL_TOKEN', 'TUNNEL_TOKEN')
 
 
@@ -70,6 +78,14 @@ class NodeRun:
         self.started = time.time()
         self.end = self.started + 11250 - 600
         self.deadline_confirmed = False
+        self.lock = None
+        self.warm_report = None
+        self.current = None
+        self.load = None
+        self.resuming = bool(self.env.get('RESUME'))
+        if self.resuming:
+            self.attach_record(self.env['RESUME'])
+            return
         self.id = 'node-run-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
         self.run = ROOT/'runs'/self.id
         self.path = ROOT/'runs'/(self.id+'.json')
@@ -80,10 +96,20 @@ class NodeRun:
                        'report': str(self.path), 'run_dir': str(self.run),
                        'tunnel': {'preflight': None, 'launched': False, 'pid': None,
                                   'status': 'not started', 'reason': None, 'waited_seconds': 0}}
-        self.lock = None
-        self.warm_report = None
-        self.current = None
-        self.load = None
+
+    def attach_record(self, run_id):
+        # The run id is a path component; accept only our own format.
+        if not RUN_ID.fullmatch(run_id):
+            raise GateFailure('RESUME must be a run id like node-run-20261101T230000.000000Z')
+        self.id, self.run, self.path = run_id, ROOT/'runs'/run_id, ROOT/'runs'/(run_id+'.json')
+        try:
+            self.record = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            raise GateFailure('RESUME run record is missing or unreadable') from None
+        if not self.run.is_dir():
+            raise GateFailure('RESUME run directory is missing')
+        self.record.update(state='running', failure_reason=None)
+        self.record.setdefault('resumes', []).append({'started_epoch': self.started})
 
     def safe(self, text):
         return redact(text, self.secrets)
@@ -174,8 +200,7 @@ class NodeRun:
                                      'CF_TUNNEL_TOKEN': self.tunnel_token})
 
     def tunnel_preflight(self):
-        result = node_tunnel.prerequisites(self.env, self.tunnel_token,
-                                          ROOT/'vendor/infer-gateway/node-tunnel.sh')
+        result = node_tunnel.prerequisites(self.env, self.tunnel_token)
         self.record['tunnel']['preflight'] = result
         if result['status'] != 'PASS':
             self.record['tunnel']['reason'] = result['reason']
@@ -183,7 +208,10 @@ class NodeRun:
         try:
             self.tunnel_url = node_tunnel.public_url(
                 self.env, self.env.get('RELAY_PUBLIC_URL', 'https://infer-origin.belweave.tech'))
-            self.tunnel_wait = number(self.env, 'TUNNEL_WAIT_SECONDS', 180)
+            self.tunnel_wait = number(self.env, 'TUNNEL_CONNECT_TIMEOUT', 180)
+            self.tunnel_log = Path(node_tunnel.testing_value(self.env, 'CLOUDFLARED_LOG', node_tunnel.LOG))
+            # Fetch and verify cloudflared now, not after a 13 minute warm.
+            self.record['tunnel']['binary'] = node_tunnel.stage_binary(self.env)
         except ValueError as exc:
             raise GateFailure(str(exc)) from None
         self.record['tunnel']['url'] = self.tunnel_url
@@ -192,10 +220,14 @@ class NodeRun:
         self.source_node_env()
         cap = number(self.env, 'CREDIT_CAP_SECONDS', 11250, minimum=600)
         try:
-            origin = provisioned(self.env.get('PROVISIONED_AT'), self.started)
+            # A resume keeps the original window; it never earns a fresh one.
+            fallback = self.record.get('provisioned_epoch', self.started) if self.resuming else self.started
+            origin = provisioned(self.env.get('PROVISIONED_AT'), fallback)
         except (ValueError, OverflowError):
             raise GateFailure('invalid PROVISIONED_AT') from None
         self.end = origin+cap-600
+        if self.resuming and self.record.get('teardown_deadline_epoch'):
+            self.end = min(self.end, self.record['teardown_deadline_epoch'])
         self.deadline_confirmed = True
         self.record.update(provisioned_epoch=origin, credit_cap_seconds=cap,
                            teardown_deadline_epoch=self.end, margin_seconds=600)
@@ -208,7 +240,8 @@ class NodeRun:
             raise GateFailure('another node-run is active') from None
         testing = self.env.get('NODE_RUN_TESTING') == '1'
         test_names = ('EXPECT_GPU_NAME', 'EXPECT_GPU_COUNT', 'NODE_RUN_WARM_CMD', 'NODE_RUN_RELAY_URL',
-                      'NODE_RUN_GUARD_HEALTH_URL', 'NODE_RUN_TUNNEL_PUBLIC_URL')
+                      'NODE_RUN_GUARD_HEALTH_URL', 'NODE_RUN_TUNNEL_PUBLIC_URL', 'NODE_RUN_ENGINE_HEALTH_URL',
+                      'CLOUDFLARED_BIN', 'CLOUDFLARED_LOG', 'CLOUDFLARED_GITHUB_URL')
         if not testing and any(name in self.env for name in test_names):
             raise GateFailure('test overrides require NODE_RUN_TESTING=1')
         # Hard gate before even docker info, and before downloads/pulls/warm.
@@ -232,10 +265,15 @@ class NodeRun:
             engine_port = front_port(self.env)
         except ValueError as exc:
             raise GateFailure(str(exc)) from None
+        if self.resuming and self.record.get('image_ref') != self.image['image_ref']:
+            raise GateFailure('RESUME image pin differs from the original run')
         self.record.update(self.image)
         _, sha = self.command(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'])
-        self.record['git_sha'] = sha.strip()
-        self.env['WINDOW_END'] = str(math.floor(origin+cap))
+        if self.resuming:
+            self.record['resumes'][-1]['git_sha'] = sha.strip()
+        else:
+            self.record['git_sha'] = sha.strip()
+        self.env['WINDOW_END'] = str(math.floor(self.end+600))
         # Warm and guards receive exactly this same pinned reference.
         self.env.update(ENGINE_IMAGE=self.image['image_ref'], IMAGE_DIGEST=self.image['image_digest'])
         if 'BAKED_IMAGE' in self.env:
@@ -248,6 +286,7 @@ class NodeRun:
         except ImportError:
             raise GateFailure('python dependency aiohttp is required') from None
         self.command(['docker', 'info'])
+        self.engine_port = engine_port
         _, output = self.command(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'])
         rows = list(csv.reader(output.strip().splitlines()))
         expected = int(self.env.get('EXPECT_GPU_COUNT', '8'))
@@ -261,14 +300,12 @@ class NodeRun:
             for i, row in enumerate(rows)]
         if len({8000, engine_port, 8600, 8601}) != 4:
             raise GateFailure('relay, engine and guard ports must be distinct')
-        for port in (8000, engine_port, 8600, 8601):
-            try:
-                with socket.socket() as sock:
-                    sock.bind(('127.0.0.1', port))
-            except OSError:
-                raise GateFailure(f'port {port} is occupied') from None
         self.record['ports'] = {'relay': 8000, 'engine': engine_port, 'guards': [8600, 8601]}
-        self.disk_check()
+        if not self.resuming:
+            # A resume relies on what is still running; a fresh run starts clean.
+            self.clean_stale()
+            self.ports_free((8000, engine_port, 8600, 8601))
+            self.disk_check()
         import guards
         if self.private:
             self.guard_plans, self.guard_vram = [], 0
@@ -295,6 +332,33 @@ class NodeRun:
         self.tokens = number(self.env, 'FIT_TOKENS_PER_STREAM', 32768, integer=True)
         self.context = number(self.env, 'CONTEXT_LENGTH', 262144, integer=True)
 
+    def clean_stale(self):
+        """Remove our leftovers from an earlier run: engine and guard containers, and the relay."""
+        _, names = self.command(['docker', 'ps', '-a', '--format', '{{.Names}}'])
+        stale = [name for name in names.split() if name.startswith(('b300-warm-', 'node-run-'))]
+        if stale:
+            self.command(['docker', 'rm', '-f', *stale], timeout=60)
+        relays = own_relays()
+        for pid in relays:
+            stop(pid)
+        self.record['cleanup'] = {'containers': stale, 'relay_pids': relays}
+        if stale or relays:
+            self.say(f'CLEANUP removed {len(stale)} stale container(s) and stopped {len(relays)} old relay(s)')
+
+    def ports_free(self, ports, wait=5):
+        for port in ports:
+            until = time.monotonic()+wait
+            while True:
+                try:
+                    with socket.socket() as sock:
+                        sock.bind(('127.0.0.1', port))
+                    break
+                except OSError:
+                    if time.monotonic() >= until:
+                        raise GateFailure(f'port {port} ({PORTS.get(port, "engine")}) is held by a process '
+                                          'that is not ours; stop it and rerun') from None
+                    time.sleep(0.2)
+
     def disk_check(self):
         from warm_download import load_manifest
         weights = Path(self.env['WEIGHTS_DIR'])
@@ -314,6 +378,48 @@ class NodeRun:
             if mode == 'fail':
                 raise GateFailure('insufficient free space at weights directory')
             self.say('WARNING: free space at weights directory is below configured threshold')
+
+    def attach(self):
+        """RESUME: fail closed unless the original engine is provably the one still serving."""
+        runs = self.record.get('warm_runs') or []
+        if not runs:
+            raise GateFailure('RESUME run never reached warm; start a fresh run')
+        ready = runs[-1]['ready']
+        name = ready.get('container')
+        path = Path(ready['timing_file']).resolve()
+        if not name or not path.is_relative_to((ROOT/'runs').resolve()):
+            raise GateFailure('RESUME warm record has no engine container or report')
+        try:
+            warm = json.loads(path.read_text())
+        except (OSError, ValueError):
+            raise GateFailure('RESUME warm report is missing or unreadable') from None
+        if warm.get('image_ref') != self.image['image_ref'] or not warm.get('image_id'):
+            raise GateFailure('RESUME warm report does not match the pinned image')
+        code, output = self.command(['docker', 'inspect', name], check=False)
+        if code:
+            raise GateFailure(f'engine container {name} no longer exists')
+        try:
+            info = json.loads(output)[0]
+            running, image, mounts = info['State']['Running'], info['Image'], info.get('Mounts') or []
+        except (ValueError, LookupError, TypeError):
+            raise GateFailure('engine container inspect output is invalid') from None
+        if running is not True:
+            raise GateFailure(f'engine container {name} is not running')
+        if image != warm['image_id']:
+            raise GateFailure(f'engine container {name} runs a different image than the pin')
+        weights = [m.get('Source') for m in mounts if m.get('Destination') == '/weights']
+        if weights != [str(Path(self.env['WEIGHTS_DIR']).absolute())]:
+            raise GateFailure(f'engine container {name} mounts a different weights directory')
+        from warm_download import load_manifest
+        if ready.get('revision') != load_manifest()['model']['revision']:
+            raise GateFailure('engine weights revision differs from the model manifest')
+        url = self.env.get('NODE_RUN_ENGINE_HEALTH_URL', f'http://127.0.0.1:{self.engine_port}').rstrip('/')
+        if http_status(url+'/health', self.env['INFER_UPSTREAM_KEY']) != 200:
+            raise GateFailure(f'engine health on port {self.engine_port} did not return 200')
+        self.warm_report, self.current = path, int(warm['config']['MAX_RUNNING_REQUESTS'])
+        # A fit fallback to 64 still relaunches through warm.sh, inside the same window.
+        self.requested_timeout = number(self.env, 'WARM_TIMEOUT_SECONDS', 3600, integer=True)
+        self.record['resumes'][-1].update(container=name, concurrency=self.current)
 
     def warm_timeout(self):
         self.requested_timeout = number(self.env, 'WARM_TIMEOUT_SECONDS', 3600, integer=True)
@@ -435,26 +541,97 @@ class NodeRun:
             return plan['mem_fraction_static']
         return round(1-(row['free_mib']-budget)/row['total_mib'], 4)
 
+    def reuse_guard(self, plan):
+        """RESUME only: keep a guard container that is still running and healthy."""
+        code, state = self.command(['docker', 'inspect', plan['name'], '--format', '{{.State.Running}}'], check=False)
+        if code == 0 and state.strip() == 'true':
+            try:
+                asyncio.run(self.guards_healthy([plan]))
+                return True
+            except GateFailure:
+                pass
+        if code == 0:
+            self.command(['docker', 'rm', '-f', plan['name']], timeout=60)
+        return False
+
     def guards(self):
         before = self.memory()
         processes_before = self.processes()
+        previous = (self.record.get('guard_bench') or {}).get('guards', {})
+        vram, reused = {}, []
         for plan in self.guard_plans:
+            if self.resuming and self.reuse_guard(plan):
+                reused.append(plan['name'])
+                vram[plan['name']] = previous.get(plan['name'], {}).get('vram_mib')
+                continue
             Path(plan['cache_dir']).mkdir(parents=True, exist_ok=True)
             argv = list(plan['argv'])
             fraction = self.guard_fraction(plan)
             argv[argv.index('--mem-fraction-static')+1] = str(fraction)
             plan['effective_mem_fraction_static'] = fraction; self.save()
+            used = self.memory()[plan['gpu']]['used_mib']
             self.command(argv, timeout=120)
             # One at a time, so the second guard sizes itself against what the first left.
             asyncio.run(self.guards_healthy([plan]))
+            vram[plan['name']] = self.memory()[plan['gpu']]['used_mib']-used
         after = self.memory()
         delta = [{'index': a['index'], 'guard_vram_mib': a['used_mib']-b['used_mib']}
                  for b, a in zip(before, after)]
         self.record['measurements']['guard_memory'] = {
-            'before': before, 'after': after, 'per_gpu': delta,
+            'before': before, 'after': after, 'per_gpu': delta, 'reused': reused,
             'processes_before': processes_before, 'processes_after': self.processes(),
             'basis': 'observed per-rank change; includes any concurrent serving-engine variation'}
-        self.guard_vram = sum(max(0, r['guard_vram_mib']) for r in delta)
+        if reused:
+            self.guard_vram = self.record.get('guard_vram_mib') or sum(max(0, v or 0) for v in vram.values())
+        else:
+            self.guard_vram = sum(max(0, r['guard_vram_mib']) for r in delta)
+        self.record['guard_vram_mib'] = self.guard_vram
+        self.record['guard_bench'] = asyncio.run(self.guard_bench(vram))
+        self.save()
+
+    async def guard_bench(self, vram):
+        """Short latency and canary check against each guard, inert inputs only, about 45 s at most."""
+        import aiohttp
+        from safety import (CANARY, ClassifierUnavailable, Qwen3GuardClassifier, SafetyConfig,
+                            SafetyScorer, ShieldstralClassifier, score_text)
+        config = SafetyConfig.from_env(self.env)
+        if self.env.get('NODE_RUN_GUARD_HEALTH_URL'):
+            config = replace(config, url=self.env['NODE_RUN_GUARD_HEALTH_URL'],
+                             qwen_url=self.env['NODE_RUN_GUARD_HEALTH_URL'])
+        rounds = number(self.env, 'GUARD_BENCH_ROUNDS', 8, integer=True)
+        started = time.monotonic()
+        until = started+min(45, self.remaining())
+        result = {}
+        async with aiohttp.ClientSession(trust_env=False) as session:
+            shield, qwen = ShieldstralClassifier(config, session), Qwen3GuardClassifier(config, session)
+            try:
+                for plan, guard in zip(self.guard_plans, (shield, qwen)):
+                    times, flagged = [], 0
+                    for text in BENCH_TEXTS*rounds:
+                        if time.monotonic() >= until:
+                            break
+                        clock = time.perf_counter()
+                        score = (await guard.score([text]))[0]
+                        times.append((time.perf_counter()-clock)*1000)
+                        flagged += score >= config.threshold
+                    times.sort()
+                    result[plan['name']] = {
+                        'requests': len(times), 'p50_ms': percentile(times, 0.5), 'p99_ms': percentile(times, 0.99),
+                        'benign_flagged': flagged, 'canary_model_score': (await guard.score([CANARY]))[0],
+                        'vram_mib': vram.get(plan['name'])}
+                scorer = SafetyScorer(config, shield, qwen, shield)
+                canary = {phase: (await score_text(scorer, CANARY, phase))[0] for phase in ('input', 'output')}
+            except ClassifierUnavailable:
+                raise GateFailure('guard benchmark: a guard did not return a valid score') from None
+        if not all(canary.values()):
+            raise GateFailure('guard benchmark: the drill canary was not flagged')
+        if any(row['benign_flagged'] for row in result.values()):
+            self.say('WARNING: a guard flagged benign benchmark text; see guard_bench in the report')
+        for name, row in result.items():
+            self.say(f"GUARD BENCH {name} p50_ms={row['p50_ms']} p99_ms={row['p99_ms']} "
+                     f"vram_mib={row['vram_mib']} n={row['requests']}")
+        return {'guards': result, 'canary_flag': canary, 'seconds': time.monotonic()-started,
+                'inputs': 'benign placeholder text and the drill canary only'}
 
     async def relay_safety(self):
         import aiohttp
@@ -559,33 +736,43 @@ class NodeRun:
                             raise GateFailure(label+' found in runs output (value suppressed)')
                     tail = data[-overlap:] if overlap else b''
 
-    def start_tunnel(self):
-        # The inference handoff is green. Optional tunnel timeout must not turn
-        # it red, but this step still cannot extend the absolute credit budget.
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        started = time.monotonic()
-        until = started+max(0, min(self.tunnel_wait, self.end-time.time()))
+    def tunnel(self):
+        """Hard gate: a registered cloudflared connection, then a keyless probe through the public URL."""
         result = self.record['tunnel']
-        result.update(status='not started', reason='timeout')
+        started = time.monotonic()
+        until = started+min(self.tunnel_wait, self.remaining())
         try:
-            if until > time.monotonic():
+            pid = result.get('pid')
+            if self.resuming and pid and node_tunnel.alive(pid, 'cloudflared'):
+                # Same connector as the first attempt; it may simply have connected late.
+                offset = result.get('log_offset', 0)
+                result['reused'] = True
+            else:
+                offset = node_tunnel.log_size(self.tunnel_log)
                 pid, reason, output = node_tunnel.launch(
-                    result['preflight']['script'], self.env, self.tunnel_token, until-time.monotonic())
+                    result['preflight']['script'], self.env, self.tunnel_token, min(60, until-time.monotonic()))
                 # Both captured streams are redacted in memory before any disk write.
                 (self.run/'tunnel.log').write_text(self.safe(output))
-                result.update(launched=pid is not None, pid=pid, reason=reason or 'timeout')
-                self.save()
-                if pid is not None and asyncio.run(node_tunnel.reachable(self.tunnel_url, until)):
-                    result.update(status='up', reason=None)
-        except Exception:
-            # Neither arbitrary subprocess errors nor HTTP responses are printed.
-            result.update(status='not started', reason='launch failed')
-        result['waited_seconds'] = time.monotonic()-started
-        self.save()
-        if result['status'] == 'up':
-            self.say('TUNNEL UP url='+self.tunnel_url)
-        else:
-            self.say('TUNNEL NOT STARTED reason='+result['reason'])
+                result.update(launched=pid is not None, pid=pid, reused=False, log_offset=offset)
+                if pid is None:
+                    raise GateFailure('tunnel '+reason)
+            while not node_tunnel.registered(self.tunnel_log, offset):
+                if not node_tunnel.alive(pid):
+                    raise GateFailure('tunnel cloudflared exited before registering a connection')
+                if time.monotonic() >= until:
+                    raise GateFailure('tunnel registered no edge connection within TUNNEL_CONNECT_TIMEOUT')
+                time.sleep(0.5)
+            result['registered_seconds'] = time.monotonic()-started
+            if not asyncio.run(node_tunnel.reachable(self.tunnel_url, until, private=self.private)):
+                raise GateFailure('tunnel connected but the public URL never reached the relay')
+        except GateFailure as exc:
+            result.update(status='not up', reason=str(exc))
+            raise
+        finally:
+            result['waited_seconds'] = time.monotonic()-started
+            self.save()
+        result.update(status='up', reason=None)
+        self.say('TUNNEL UP url='+self.tunnel_url)
 
     def reminder(self):
         utc = datetime.fromtimestamp(self.end if self.deadline_confirmed else self.started, timezone.utc)
@@ -593,12 +780,14 @@ class NodeRun:
                  ' / '+utc.strftime('%Y-%m-%d %H:%M:%S UTC')+' (manual; release the allocation)')
 
     def run_all(self):
-        for name, action in (
-            ('preflight', self.preflight), ('warm-timeout', self.warm_timeout), ('key', self.read_key),
-            ('warm', self.warm), ('guards', self.guards),
-            ('relay-safety', lambda: asyncio.run(self.relay_safety())),
-            ('kv-pool', self.pool), ('loadtest', self.loadtest), ('fit', self.fit),
-        ):
+        if self.resuming:
+            early = (('preflight', self.preflight), ('key', self.read_key), ('resume', self.attach))
+        else:
+            early = (('preflight', self.preflight), ('warm-timeout', self.warm_timeout),
+                     ('key', self.read_key), ('warm', self.warm))
+        late = (('guards', self.guards), ('relay-safety', lambda: asyncio.run(self.relay_safety())),
+                ('kv-pool', self.pool), ('loadtest', self.loadtest), ('fit', self.fit), ('tunnel', self.tunnel))
+        for name, action in early+late:
             if getattr(self, 'private', False) and name in ('guards', 'relay-safety', 'loadtest', 'fit'):
                 self.say(f'SKIP {name} (PRIVATE_UNGUARDED=1: no CSAM block, private key only)')
                 continue
@@ -612,13 +801,76 @@ class NodeRun:
         self.check_key_leak()
         self.say(f'NODE READY FOR DRILL relay={self.public_url} local=http://127.0.0.1:8000 '
                  f'fit={self.current} p99_ms={self.load.p99_ms if self.load else float("nan"):.2f} '
-                 f'guard_vram_mib={self.guard_vram} report={self.path}')
-        self.start_tunnel()
+                 f'guard_vram_mib={getattr(self, "guard_vram", 0)} report={self.path}')
         with self.gate('key-leak', check_deadline=False):
             self.record['ended_epoch'] = time.time()
             self.check_key_leak()
         # Include the final gate timing/report serialization in the literal scan.
         self.check_key_leak()
+
+    def resume_hint(self):
+        """After a late failure the engine stays up; say exactly how to rerun without a re-warm."""
+        gates = self.record['gates']
+        warmed = any(r['name'] in ('warm', 'resume') and r['status'] == 'PASS' for r in gates)
+        failed = [r['name'] for r in gates if r['status'] == 'FAIL']
+        # warm.sh removes its own engine when the single 64 relaunch fails.
+        if not warmed or not failed or failed[-1] not in (*LATE, 'handoff', 'kv-pool-64', 'relay-safety-64', 'loadtest-64'):
+            return
+        command = f'RESUME={self.id} ./scripts/node-run.sh < /path/to/classifier-key'
+        self.record['resume_command'] = command
+        self.say('ENGINE KEPT: the engine is still up. Fix the cause, then rerun only the remaining gates:')
+        self.say('  '+command)
+
+
+def own_relays():
+    """PIDs of our own sse_relay.py processes (same user, this checkout's script)."""
+    script = str(ROOT/'scripts/sse_relay.py')
+    found = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            if entry.stat().st_uid != os.getuid():
+                continue
+            argv = (entry/'cmdline').read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if script.encode() in argv:
+            found.append(int(entry.name))
+    return found
+
+
+def stop(pid, wait=5):
+    try:
+        os.kill(pid, signal.SIGTERM)
+        until = time.monotonic()+wait
+        while time.monotonic() < until:
+            os.kill(pid, 0)
+            time.sleep(0.1)
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def http_status(url, key):
+    import urllib.error
+    import urllib.request
+    # Loopback only; the key goes in a header, never a URL or log line.
+    request = urllib.request.Request(url, headers={'Authorization': 'Bearer '+key})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except OSError:
+        return None
+
+
+def percentile(values, fraction):
+    """Nearest-rank percentile of an already sorted list."""
+    if not values:
+        return None
+    return round(values[max(0, math.ceil(fraction*len(values))-1)], 2)
 
 
 def main():
@@ -627,11 +879,16 @@ def main():
         for name in GATES:
             print('PLAN '+name)
         print('Plan: pinned TP8 warm; two pinned loopback guards; 130 rps; 128 or one fallback to 64.')
-        print('Plan: require tunnel helper/token/tools before warm; after handoff launch and probe without auth; scan both secrets.')
+        print('Plan: preflight cleans stale containers and our relay, stages a verified cloudflared; tunnel is a hard gate before handoff.')
+        print('Plan: a late failure keeps the engine up and prints RESUME=<run id> to rerun only the late gates.')
         print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; no automatic restarts.')
         return 0
     os.umask(0o077)
-    runner = NodeRun()
+    try:
+        runner = NodeRun()
+    except GateFailure as exc:
+        print('FAIL resume: '+str(exc), flush=True)
+        return 1
 
     def interrupted(signum, frame):
         raise GateFailure('teardown deadline reached' if signum == signal.SIGALRM else 'interrupted')
@@ -650,6 +907,7 @@ def main():
             runner.record['gates'].append({'name': 'handoff', 'status': 'FAIL', 'reason': runner.safe(reason),
                                            'started_epoch': now, 'ended_epoch': now, 'seconds': 0})
             runner.say('FAIL handoff: '+reason)
+        runner.resume_hint()
         runner.save()
         try:
             with runner.gate('key-leak-on-failure', check_deadline=False):
