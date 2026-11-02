@@ -13,6 +13,9 @@ from urllib.parse import urlsplit
 
 from mirror_auth import parse_mirror_auth
 
+# Cloudflare's bot check rejects urllib's default user agent with 403 (error 1010).
+USER_AGENT = 'b300-inference'
+
 CLOUDFLARED_VERSION = '2026.10.7'
 CLOUDFLARED_SHA256 = '1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872'
 # Object path under the MIRROR_URL origin. Netops uploads the binary (and a .sha256 beside it) here.
@@ -68,7 +71,7 @@ def mirror_base(env):
 
 def download(url, headers, target, timeout, redirects):
     handlers = [urllib.request.ProxyHandler({})] + ([] if redirects else [NoRedirect()])
-    request = urllib.request.Request(url, headers=headers)
+    request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT, **headers})
     with urllib.request.build_opener(*handlers).open(request, timeout=timeout) as response, target.open('wb') as out:
         shutil.copyfileobj(response, out, 1024*1024)
 

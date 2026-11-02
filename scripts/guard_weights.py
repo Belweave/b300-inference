@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from mirror_auth import parse_mirror_auth
 # One mirror origin rule and one no-redirect handler, shared with the cloudflared fetch.
-from node_tunnel import NoRedirect, mirror_base, testing_value
+from node_tunnel import USER_AGENT, NoRedirect, mirror_base, testing_value
 
 MANIFEST = Path(__file__).resolve().parents[1]/'config/manifests/guards.json'
 HF_URL = 'https://huggingface.co'
@@ -93,7 +93,7 @@ def verify(env, repo, revision, root):
 def fetch(url, headers, redirects, target, f, timeout):
     """Stream to target while hashing; True only if size and SHA256 both match."""
     handlers = [urllib.request.ProxyHandler({})] + ([] if redirects else [NoRedirect()])
-    request = urllib.request.Request(url, headers=headers)
+    request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT, **headers})
     digest, size = hashlib.sha256(), 0
     with urllib.request.build_opener(*handlers).open(request, timeout=timeout) as response, target.open('wb') as out:
         while chunk := response.read(CHUNK):
