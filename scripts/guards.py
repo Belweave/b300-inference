@@ -29,14 +29,16 @@ def plans(env, image, run_id):
         if not math.isfinite(fraction) or not 0 < fraction < 1:
             raise ValueError(label+' mem fraction must be between 0 and 1')
         name = run_id.lower()+'-'+label
+        # guard_weights.stage fills this dir from the pinned manifest before launch.
+        weights = cache/model/revision
         args = ['docker', 'run', '-d', '--name', name, '--gpus', f'device={gpu}',
                 '--network', 'host', '--ipc', 'host', '--log-driver', 'json-file', '--log-opt', 'max-size=20m',
-                '--mount', f'type=bind,src={cache},dst=/guard-cache',
-                '--env', 'HF_HOME=/guard-cache', '--entrypoint', 'python3', image['image_ref'],
-                '-m', 'sglang.launch_server', '--model-path', model, '--revision', revision,
+                '--mount', f'type=bind,src={weights},dst=/guard-model,readonly',
+                '--env', 'HF_HUB_OFFLINE=1', '--entrypoint', 'python3', image['image_ref'],
+                '-m', 'sglang.launch_server', '--model-path', '/guard-model', '--served-model-name', model,
                 '--host', '127.0.0.1', '--port', str(port), '--dtype', 'bfloat16',
                 '--mem-fraction-static', str(fraction), '--context-length', '8192',
-                '--max-running-requests', '128', '--download-dir', '/guard-cache']
+                '--max-running-requests', '128']
         result.append({'name': name, 'model': model, 'revision': revision, 'port': port,
-                       'gpu': gpu, 'mem_fraction_static': fraction, 'cache_dir': str(cache), 'argv': args})
+                       'gpu': gpu, 'mem_fraction_static': fraction, 'cache_dir': str(cache), 'weights_dir': str(weights), 'argv': args})
     return result

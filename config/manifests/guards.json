@@ -1,0 +1,149 @@
+{
+  "note": "Pinned guard weights. Every file is checked against these sizes and SHA256 before a guard loads it.",
+  "guards": [
+    {
+      "repo": "mistralai/Shieldstral-1.0-3B",
+      "revision": "003ec7e2b0bab5f0e6307edbaf186fa5822b76f5",
+      "files": [
+        {
+          "filename": ".gitattributes",
+          "sha256": "07b3b4b04ce1da1f27be4f1ff90006c9b8ace80cc0eb81bdd182a11257f4498c",
+          "size": 1618,
+          "lfs": false
+        },
+        {
+          "filename": "README.md",
+          "sha256": "b67233168fac38fa63658f70a1b59901da612cfa19cd14cc6ecaf804b9003d9d",
+          "size": 23152,
+          "lfs": false
+        },
+        {
+          "filename": "chat_template.jinja",
+          "sha256": "df026d5384cfbb925dd35ff96b9c55ce7257ec8d47d5fa73757673bd4c98ce53",
+          "size": 7095,
+          "lfs": false
+        },
+        {
+          "filename": "config.json",
+          "sha256": "a0b1122916b629ab9c3b54a422476e3f4bf4f2b66353a82c43c349c4fe2257ad",
+          "size": 1654,
+          "lfs": false
+        },
+        {
+          "filename": "consolidated.safetensors",
+          "sha256": "25bcdaafaf81fe79982409ffaf9b3e269abe67d9064fed349b424944db92095e",
+          "size": 7698234952,
+          "lfs": true
+        },
+        {
+          "filename": "generation_config.json",
+          "sha256": "7e8a15f269bb1b52e54ed4f4ef5a0b73014f15275a7d2a9d2bf6f8c291c494bd",
+          "size": 126,
+          "lfs": false
+        },
+        {
+          "filename": "model.safetensors",
+          "sha256": "87753e30c8c321da478b83bbabebcd813cc9b3d0cee5c5b3d64349a8ee4172f7",
+          "size": 7698241104,
+          "lfs": true
+        },
+        {
+          "filename": "params.json",
+          "sha256": "9e5afb715882b931c491aad8a1c6127fdea8d7031cadba14763da779833cbad6",
+          "size": 1208,
+          "lfs": false
+        },
+        {
+          "filename": "processor_config.json",
+          "sha256": "bb6bbc47d9aec510c0ee42c2eeecde5cb54fa96cd85035c7248b35f91157deab",
+          "size": 660,
+          "lfs": false
+        },
+        {
+          "filename": "tekken.json",
+          "sha256": "ceb11e85e44d7c91d051604d636d97b05aee59a907a0dc96a3c6e557d9634e18",
+          "size": 16275088,
+          "lfs": true
+        },
+        {
+          "filename": "tokenizer.json",
+          "sha256": "9172cf28b79a17502736f971b560faeced38ee527540cea6882a1f40cce320c0",
+          "size": 17077322,
+          "lfs": true
+        },
+        {
+          "filename": "tokenizer_config.json",
+          "sha256": "b41ad95e3321bd29dcbc525de2b34d74f0d64e6a96add615149e448bff5c38c3",
+          "size": 261,
+          "lfs": false
+        }
+      ]
+    },
+    {
+      "repo": "Qwen/Qwen3Guard-Gen-0.6B",
+      "revision": "fada3b2f655b89601929198343c94cd2f64d93cc",
+      "files": [
+        {
+          "filename": ".gitattributes",
+          "sha256": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+          "size": 1570,
+          "lfs": false
+        },
+        {
+          "filename": "LICENSE",
+          "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+          "size": 11343,
+          "lfs": false
+        },
+        {
+          "filename": "README.md",
+          "sha256": "3a52042f467261243d949d86a779f08ac8ff9da30ce47fd636db6e1c9c1b7635",
+          "size": 9841,
+          "lfs": false
+        },
+        {
+          "filename": "config.json",
+          "sha256": "4674816bdf440c113a9ca87aedfa069b67f7cabbd89e71da7d4e4a68adce4af4",
+          "size": 727,
+          "lfs": false
+        },
+        {
+          "filename": "generation_config.json",
+          "sha256": "5f0bc42aae9f779d06bf620ce685a02cb0cde802d0f27f05c7331aaf0e1fd2d7",
+          "size": 161,
+          "lfs": false
+        },
+        {
+          "filename": "merges.txt",
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+          "size": 1671853,
+          "lfs": false
+        },
+        {
+          "filename": "model.safetensors",
+          "sha256": "4f3ce47ebd968cddb67de08d8764f8ede7c410a7d1fb9e08145a4c7a2f2e5c0f",
+          "size": 1503300328,
+          "lfs": true
+        },
+        {
+          "filename": "tokenizer.json",
+          "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "size": 11422654,
+          "lfs": true
+        },
+        {
+          "filename": "tokenizer_config.json",
+          "sha256": "934e187433b06c5d28519e0347dd293084cf28621f00a86ae7e24e42f8b53e81",
+          "size": 9601,
+          "lfs": false
+        },
+        {
+          "filename": "vocab.json",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833,
+          "lfs": false
+        }
+      ]
+    }
+  ]
+}

@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import os
@@ -80,7 +81,12 @@ if sys.argv[1] == 'run':
     assert '-d' in sys.argv
     assert '--restart' not in sys.argv
     assert sys.argv[sys.argv.index('--host')+1] == '127.0.0.1'
-    assert sys.argv[sys.argv.index('--revision')+1] == 'a'*40
+    # The pinned revision is the staged dir; nothing downloads inside the container.
+    mount = sys.argv[sys.argv.index('--mount')+1]
+    assert mount.endswith('/'+'a'*40+',dst=/guard-model,readonly')
+    assert Path(mount.split('src=')[1].split(',')[0], 'config.json').is_file()
+    assert sys.argv[sys.argv.index('--model-path')+1] == '/guard-model'
+    assert 'HF_HUB_OFFLINE=1' in sys.argv
     assert any('@sha256:' in arg for arg in sys.argv)
     (state/'guards').touch()
     print('fake-container')
@@ -155,6 +161,21 @@ def tunnel_fixture(home):
     return config
 
 
+def guard_fixture(home):
+    """A one-file manifest for both PIN guards, already staged, so the gate reuses it offline."""
+    body = b'fixture guard weights\n'
+    files = [{'filename': 'config.json', 'size': len(body), 'sha256': hashlib.sha256(body).hexdigest(), 'lfs': False}]
+    guards_list = []
+    for repo in ('mistralai/Shieldstral-1.0-3B', 'Qwen/Qwen3Guard-Gen-0.6B'):
+        folder = home/'guards-cache'/repo/PIN
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder/'config.json').write_bytes(body)
+        guards_list.append({'repo': repo, 'revision': PIN, 'files': files})
+    manifest = home/'guards.json'
+    manifest.write_text(json.dumps({'guards': guards_list}))
+    return {'GUARD_WEIGHTS_DIR': str(home/'guards-cache'), 'GUARD_MANIFEST': str(manifest)}
+
+
 class RehearsalTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory(dir='/tmp')
@@ -181,7 +202,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
                     'NODE_RUN_WARM_CMD': str(self.folder/'warm.sh'), 'NODE_RUN_RELAY_URL': self.url,
                     'NODE_RUN_TUNNEL_PUBLIC_URL': self.url, 'TUNNEL_WAIT_SECONDS': '0.15',
                     'NODE_RUN_GUARD_HEALTH_URL': self.url, 'FAKE_STATE': str(self.folder),
-                    'WEIGHTS_DIR': str(self.folder/'weights'), 'GUARD_WEIGHTS_DIR': str(self.folder/'guards-cache'),
+                    'WEIGHTS_DIR': str(self.folder/'weights'), **guard_fixture(self.folder),
                     'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'upstream-fixture',
                     'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN,
                     'LOADTEST_DURATION_SECONDS': '0.12', 'GUARD_TIMEOUT_SECONDS': '1'}
@@ -640,7 +661,7 @@ class PureNodeTests(unittest.TestCase):
                 env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE,
                        'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1',
                        'NODE_RUN_WARM_CMD': str(scratch/'warm.sh'), 'FAKE_STATE': folder,
-                       'WEIGHTS_DIR': str(scratch/'weights'), 'GUARD_WEIGHTS_DIR': str(scratch/'cache'),
+                       'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch),
                        'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'fixture',
                        'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN,
                        'LOADTEST_DURATION_SECONDS': '0.01', 'FIT_TOKENS_PER_STREAM': '32768'}
