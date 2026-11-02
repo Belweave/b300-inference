@@ -956,12 +956,12 @@ class PureNodeTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
         base = f'http://127.0.0.1:{server.server_port}'
-        mirror_path = '/mirror/'+node_tunnel.MIRROR_OBJECT
+        mirror_path = '/'+node_tunnel.MIRROR_OBJECT  # tools sit at the origin root, not under the model base
         self.assertEqual(node_tunnel.MIRROR_OBJECT, 'tools/cloudflared/2026.10.7/cloudflared-linux-amd64')
         with tempfile.TemporaryDirectory(dir='/tmp') as folder, \
              patch('node_tunnel.platform.machine', return_value='x86_64'):
             dest = Path(folder)/'cloudflared'
-            env = {'NODE_RUN_TESTING': '1', 'CLOUDFLARED_BIN': str(dest), 'MIRROR_URL': base+'/mirror',
+            env = {'NODE_RUN_TESTING': '1', 'CLOUDFLARED_BIN': str(dest), 'MIRROR_URL': base+'/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8',
                    'MIRROR_AUTH_HEADER': 'X-Mirror-Key: fixture-only', 'CLOUDFLARED_GITHUB_URL': base+'/github',
                    'CLOUDFLARED_SHA256': hashlib.sha256(good).hexdigest()}
             for routes, source, failed in (

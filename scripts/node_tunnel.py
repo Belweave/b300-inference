@@ -15,7 +15,7 @@ from mirror_auth import parse_mirror_auth
 
 CLOUDFLARED_VERSION = '2026.10.7'
 CLOUDFLARED_SHA256 = '1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872'
-# Object path under MIRROR_URL. Netops uploads the binary (and a .sha256 beside it) here.
+# Object path under the MIRROR_URL origin. Netops uploads the binary (and a .sha256 beside it) here.
 MIRROR_OBJECT = f'tools/cloudflared/{CLOUDFLARED_VERSION}/cloudflared-linux-amd64'
 GITHUB_URL = ('https://github.com/cloudflare/cloudflared/releases/download/'
               f'{CLOUDFLARED_VERSION}/cloudflared-linux-amd64')
@@ -62,7 +62,8 @@ def mirror_base(env):
     loopback = env.get('NODE_RUN_TESTING') == '1' and parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost')
     if (parsed.scheme != 'https' and not loopback) or parsed.username or parsed.password or parsed.query:
         raise ValueError('MIRROR_URL must be HTTPS without credentials')
-    return url
+    # MIRROR_URL is the model base (<origin>/models/<name>); tools live at the origin root.
+    return f'{parsed.scheme}://{parsed.netloc}'
 
 
 def download(url, headers, target, timeout, redirects):
