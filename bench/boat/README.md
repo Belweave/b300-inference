@@ -194,6 +194,11 @@ python3 scripts/pull_mirror.py --target "$WEIGHTS_DIR" --timeout-seconds 3600
 # node-run also inherits MIRROR_ONLY=1, MIRROR_URL, and MIRROR_AUTH_HEADER.
 ```
 
+Both guards are mirrored at their pinned revisions under
+`$MIRROR_ORIGIN/models/<repo>/<revision>/<file>`, with a `manifest.json` beside
+them in the same style as the main model. node-run's guards gate pulls them from
+there first and falls back to Hugging Face; see `docs/node-run.md`.
+
 The already-staged node amd64 tool URL is
 `$MIRROR_ORIGIN/tools/cloudflared/2026.10.7/cloudflared-linux-amd64`,
 with sidecar at the same URL plus `.sha256`. Its verified size is 40,274,445

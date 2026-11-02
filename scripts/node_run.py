@@ -241,7 +241,8 @@ class NodeRun:
         testing = self.env.get('NODE_RUN_TESTING') == '1'
         test_names = ('EXPECT_GPU_NAME', 'EXPECT_GPU_COUNT', 'NODE_RUN_WARM_CMD', 'NODE_RUN_RELAY_URL',
                       'NODE_RUN_GUARD_HEALTH_URL', 'NODE_RUN_TUNNEL_PUBLIC_URL', 'NODE_RUN_ENGINE_HEALTH_URL',
-                      'CLOUDFLARED_BIN', 'CLOUDFLARED_LOG', 'CLOUDFLARED_GITHUB_URL')
+                      'CLOUDFLARED_BIN', 'CLOUDFLARED_LOG', 'CLOUDFLARED_GITHUB_URL',
+                      'GUARD_MANIFEST', 'GUARD_HF_URL')
         if not testing and any(name in self.env for name in test_names):
             raise GateFailure('test overrides require NODE_RUN_TESTING=1')
         # Hard gate before even docker info, and before downloads/pulls/warm.
@@ -555,6 +556,15 @@ class NodeRun:
         return False
 
     def guards(self):
+        import guard_weights
+        # Stage both before launching either, so a failed pull never leaves a guard running.
+        for plan in self.guard_plans:
+            try:
+                plan['weights'] = guard_weights.stage(self.env, plan['model'], plan['revision'], plan['cache_dir'])
+            except ValueError as exc:
+                raise GateFailure(str(exc)) from None
+            self.save()
+            self.say(f"guard weights {plan['model']}: {plan['weights']['sources']}")
         before = self.memory()
         processes_before = self.processes()
         previous = (self.record.get('guard_bench') or {}).get('guards', {})
@@ -564,7 +574,6 @@ class NodeRun:
                 reused.append(plan['name'])
                 vram[plan['name']] = previous.get(plan['name'], {}).get('vram_mib')
                 continue
-            Path(plan['cache_dir']).mkdir(parents=True, exist_ok=True)
             argv = list(plan['argv'])
             fraction = self.guard_fraction(plan)
             argv[argv.index('--mem-fraction-static')+1] = str(fraction)
@@ -878,7 +887,7 @@ def main():
         print('DRY RUN: no env files, stdin reads, probes, directories, containers or tunnels.')
         for name in GATES:
             print('PLAN '+name)
-        print('Plan: pinned TP8 warm; two pinned loopback guards; 130 rps; 128 or one fallback to 64.')
+        print('Plan: pinned TP8 warm; two pinned loopback guards from verified local weights; 130 rps; 128 or one fallback to 64.')
         print('Plan: preflight cleans stale containers and our relay, stages a verified cloudflared; tunnel is a hard gate before handoff.')
         print('Plan: a late failure keeps the engine up and prints RESUME=<run id> to rerun only the late gates.')
         print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; no automatic restarts.')
