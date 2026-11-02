@@ -291,11 +291,11 @@ async def score_text(scorer: SafetyScorer, text: str, phase: str) -> tuple[bool,
     if CANARY in text:
         return True, 1.0, model
     backend = scorer.input_backend if phase == 'input' else scorer.output_backend
-    score = await _score_one(backend, text)
     if qwen_output:
-        # CPU live proxy evaluation found Qwen false negatives that skipped the
-        # minors judge. Always evaluate the authoritative policy, even when
-        # Qwen reports Safe or no sexual category. Keep Qwen failures closed.
-        score = await _score_one(scorer.confirm_backend, text)
+        # Both independent checks are mandatory; propagate either failure.
+        _, score = await asyncio.gather(
+            _score_one(backend, text), _score_one(scorer.confirm_backend, text))
         model += '+confirm:' + config.model_id
+    else:
+        score = await _score_one(backend, text)
     return score >= config.threshold, score, model

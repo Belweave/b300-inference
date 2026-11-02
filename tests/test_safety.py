@@ -492,7 +492,7 @@ class OutputScoringTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(type(error)):
                     await safety.score_text(self.scorer, 'hello world', 'output')
                 if failed is self.qwen:
-                    self.minors.score.assert_not_called()
+                    self.minors.score.assert_awaited_with(['hello world'])
                 failed.score.side_effect = None
 
     async def test_invalid_qwen_or_confirmation_scores_fail_closed(self):
@@ -602,7 +602,7 @@ class OutputEndpointTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await self.post(client, phase='output'),
                                      (503, {'error': 'classifier unavailable'}))
                     if backend is self.qwen:
-                        self.classifier.score.assert_not_called()
+                        self.classifier.score.assert_awaited_with(['hello world'])
                     backend.score.side_effect = None
         self.assertNotIn('private engine text', '\n'.join(captured.output))
         self.qwen.score.side_effect = safety.ClassifierUnavailable('unavailable')

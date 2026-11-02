@@ -38,7 +38,9 @@ def plans(env, image, run_id):
                 '-m', 'sglang.launch_server', '--model-path', '/guard-model', '--served-model-name', model,
                 '--host', '127.0.0.1', '--port', str(port), '--dtype', 'bfloat16',
                 '--mem-fraction-static', str(fraction), '--context-length', '8192',
-                '--max-running-requests', '128']
+                '--max-running-requests', '32',
+                '--max-total-tokens', '8192', '--chunked-prefill-size', '2048',
+                '--max-prefill-tokens', '2048', '--cuda-graph-max-bs-decode', '32', '--cuda-graph-bs-decode', '1', '2', '4', '8', '16', '32']
         result.append({'name': name, 'model': model, 'revision': revision, 'port': port,
                        'gpu': gpu, 'mem_fraction_static': fraction, 'cache_dir': str(cache), 'weights_dir': str(weights), 'argv': args})
     return result
