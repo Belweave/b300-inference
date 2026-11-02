@@ -272,6 +272,31 @@ clears the screen when it is writing to a terminal. It reads `nvidia-smi`, file
 sizes under `WEIGHTS_DIR` and `GUARD_WEIGHTS_DIR`, and the run reports, and never
 reads an env file. The ETA comes from the download rate between two samples.
 
+The screen also shows guard health (`GET /health` on 127.0.0.1:8600 and 8601,
+1 second timeout, probed in parallel), the fit state (`not_run` when the run has
+no fit gate, as a steady-state boot won't) and the tunnel state (from the run
+report and a check that its `cloudflared` pid is alive; the shared cloudflared log
+is never read).
+
+`status.sh --json` prints the same facts as one JSON object, and `--json --loop`
+prints one object per line (NDJSON) for the phone status app to poll. `schema` is
+1; a breaking change bumps it. Times are ISO 8601 UTC, sizes are bytes, unknown
+values are `null`, and `rate_bps`/`eta_s` are `null` on the first loop sample
+(`eta_s` stays `null` while the rate is 0). `node_id` is a hash of the machine id,
+not the hostname, and gate and tunnel reasons keep only loopback addresses.
+
+| Field | Meaning |
+| --- | --- |
+| `phase` | `no_run`, `downloading`, `warming`, `running`, `ready` or `failed` |
+| `gpus` | `[{i, used_gib, total_gib, util}]`, or `null` when nvidia-smi is unavailable |
+| `downloads` | `[{label, have, target, done, files}]` for the model and each guard |
+| `gate`, `gates`, `passed`, `upcoming`, `total_gates` | from the newest `node-run-<id>.json`; `upcoming`/`total_gates` are `null` if the gates don't match node-run's plan |
+| `warm` | `{state, running, failed}` from this run's `warm-<id>.json`, or `null` |
+| `guards` | `[{name, port, up, http}]` |
+| `fit` | `{state, concurrency, p99_ms, requests, errors, reasons}`; state is `not_run`, `running`, `pass` or `fail` |
+| `tunnel` | `{status, running, connected, registered_s, reason}` |
+| `logs` | `[{path, exists}]` for the run's report and expected logs |
+
 Logs, all under `~/b300-inference/runs/`:
 
 | File | Written by | When |
