@@ -156,7 +156,7 @@ if (home/'echo-token').exists():
 if (home/'fail-tunnel').exists():
     sys.exit(1)
 (home/'tunnel-started').touch()
-# A real detached child named cloudflared (a copy of sleep), like nohup in Netops' helper.
+# A real detached child named cloudflared (a sleeping script), like nohup in Netops' helper.
 child = subprocess.Popen([str(home/'cloudflared'), '20'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
 if not (home/'no-register').exists():
@@ -170,7 +170,9 @@ def cloudflared_env(home):
     """A verified stand-in binary, so preflight staging never touches the network."""
     binary = home/'cloudflared'
     if not binary.exists():
-        shutil.copy(shutil.which('sleep'), binary)
+        # A script, not a copy of sleep: multi-call coreutils dispatch on the name.
+        binary.write_text('#!'+sys.executable+'\nimport sys, time\ntime.sleep(float(sys.argv[1]))\n')
+        binary.chmod(0o700)
     return {'CLOUDFLARED_BIN': str(binary), 'CLOUDFLARED_SHA256': node_tunnel.sha256(binary),
             'CLOUDFLARED_LOG': str(home/'cloudflared.log')}
 
