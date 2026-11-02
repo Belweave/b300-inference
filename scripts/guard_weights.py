@@ -8,7 +8,9 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from time import time_ns
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from time import strftime, time_ns
 import urllib.request
 from urllib.parse import quote
 
@@ -105,12 +107,16 @@ def fetch(url, headers, redirects, target, f, timeout):
     return size == f['size'] and digest.hexdigest() == f['sha256']
 
 
-def stage(env, repo, revision, root, timeout=60):
+def stage(env, repo, revision, root, timeout=60, log=None):
     """Leave every pinned file verified under root/<repo>/<revision>, or raise.
 
-    Returns the dir plus how many files came from each source and which sources
-    failed. Errors name only the guard, file and source, never a URL or header."""
+    Files download in parallel (GUARD_WORKERS, default 4), each trying the mirror
+    and then HF. Returns the dir plus how many files came from each source and which
+    sources failed. Errors name only the guard, file and source, never a URL or header."""
     files = pinned_files(env, repo, revision)
+    workers = int(env.get('GUARD_WORKERS', '4'))
+    if not 1 <= workers <= 16:
+        raise ValueError('GUARD_WORKERS must be 1..16')
     dest = (Path(root)/repo/revision).absolute()
     dest.mkdir(parents=True, exist_ok=True)
     sources = []
@@ -121,12 +127,17 @@ def stage(env, repo, revision, root, timeout=60):
             sources.append(('mirror', f'{origin}/models/{repo}/{revision}/', auth.headers(), False))
     # Same pinned revision, no credential, and HF redirects to its CDN.
     sources.append(('hf', f"{testing_value(env, 'GUARD_HF_URL', HF_URL)}/{repo}/resolve/{revision}/", {}, True))
-    counts, failed = {}, []
-    for f in files:
+    failed, lock = [], threading.Lock()
+
+    def note(line):
+        if log is not None:
+            with lock, open(log, 'a') as stream:
+                stream.write(f"{strftime('%H:%M:%S')} {repo} {line}\n")
+
+    def one(f):
         target = dest/f['filename']
         if matches(target, f):
-            counts['verified-local'] = counts.get('verified-local', 0)+1
-            continue
+            return 'verified-local'
         # Drop the bad copy first, so disk use never peaks above what preflight checked.
         target.unlink(missing_ok=True)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -146,10 +157,18 @@ def stage(env, repo, revision, root, timeout=60):
             if ok:
                 tmp.replace(target)
                 remember(target, f)
-                counts[name] = counts.get(name, 0)+1
-                break
+                note(f"{name} {f['filename']} {f['size']} bytes")
+                return name
             tmp.unlink(missing_ok=True)
-        else:
-            raise ValueError(f'no verified {repo} weights ('+'; '.join(failed)+')')
+        note(f"FAILED {f['filename']}")
+        return None
+
+    with ThreadPoolExecutor(workers) as pool:
+        results = list(pool.map(one, files))
+    if None in results:
+        raise ValueError(f'no verified {repo} weights ('+'; '.join(failed)+')')
+    counts = {}
+    for name in results:
+        counts[name] = counts.get(name, 0)+1
     return {'dir': str(dest), 'files': len(files), 'bytes': sum(f['size'] for f in files),
             'sources': counts, 'failed': failed}

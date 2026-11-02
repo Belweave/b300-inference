@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import aiohttp
 from warm_logic import verify_mirror, fallback
-from mirror_auth import parse_mirror_auth, mirror_request
+from mirror_auth import MirrorRequestError, parse_mirror_auth, mirror_request
 
 MANIFEST = Path(__file__).resolve().parents[1]/'config/manifests/uncensored-c19ca5c.json'
 
@@ -131,7 +131,7 @@ async def fetch(session, url, target, f, floor, end, *, mirror=False, auth=None)
         tmp.unlink(missing_ok=True)
 
 
-async def acquire(data, root, base, end, env):
+async def acquire(data, root, base, end, env, log=None):
     auth = parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
     mirror_only = env.get('MIRROR_ONLY', '0')
     if mirror_only not in ('0', '1'):
@@ -149,7 +149,15 @@ async def acquire(data, root, base, end, env):
     hashes = asyncio.Semaphore(int(env.get('HASH_WORKERS', '4')))
     if int(env.get('HASH_WORKERS', '4')) not in range(1, 17): raise ValueError('HASH_WORKERS must be 1..16')
     reuse = set(data['files']) - set(data['differs_from_base']); records = []
+    def note(row):
+        records.append(row)
+        if log is not None:
+            extra = f" {row['bytes']} bytes {row['MBps']:.0f} MB/s" if 'bytes' in row else ''
+            with open(log, 'a') as stream:
+                stream.write(f"{time.strftime('%H:%M:%S')} {row['source']} {row['file']}{extra}\n")
     mirror = env.get('MIRROR_URL', '').rstrip('/')
+    # Our own R2 mirror is the fast path; HF only fills in what it can't serve.
+    mirror_first = bool(mirror and auth)
     mirror_files = set()
     revision = data['model']['revision']
     # Retained for older HF clients; this downloader uses bounded aiohttp streams,
@@ -172,7 +180,7 @@ async def acquire(data, root, base, end, env):
                 target = root/name
                 if not target.resolve().is_relative_to(root.resolve()): raise ValueError('Unsafe target path')
                 if await check(target, f):
-                    records.append({'file':name, 'source':'verified-local'}); return
+                    note({'file':name, 'source':'verified-local'}); return
                 if name in reuse and await check(base/name, f):
                     source_state = stamp(base/name, f)
                     mode = await asyncio.to_thread(link_or_copy, base/name, target)
@@ -184,21 +192,34 @@ async def acquire(data, root, base, end, env):
                         remember(base/name, f, cache)  # hardlink creation changes ctime
                     elif not await check(target, f):
                         raise ValueError('Reused shard failed verification')
-                    records.append({'file':name, 'source':mode}); return
+                    note({'file':name, 'source':mode}); return
                 url = 'https://huggingface.co/'+data['model']['repo']+'/resolve/'+revision+'/'+quote(name)
+                mirror_url = mirror+'/'+revision+'/'+quote(name)
                 if mirror_only:
-                    stats = await fetch(session, mirror+'/'+revision+'/'+quote(name), target, f, 0, end, mirror=True, auth=auth)
+                    stats = await fetch(session, mirror_url, target, f, 0, end, mirror=True, auth=auth)
                     source = 'mirror'
+                elif mirror_first and name in mirror_files:
+                    try:
+                        stats = await fetch(session, mirror_url, target, f, 0, end, mirror=True, auth=auth)
+                        source = 'mirror'
+                    except MirrorRequestError:
+                        stats = await fetch(session, url, target, f, 0, end)
+                        source = 'hf'
                 else:
                     try:
                         stats = await fetch(session, url, target, f, float(env.get('MIN_MBPS','0')), end)
                         source = 'hf'
                     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                         if name not in mirror_files: raise
-                        stats = await fetch(session, mirror+'/'+revision+'/'+quote(name), target, f, 0, end, mirror=True, auth=auth)
+                        stats = await fetch(session, mirror_url, target, f, 0, end, mirror=True, auth=auth)
                         source = 'mirror'
                 remember(target, f, cache)
-                records.append({'file':name, 'source':source, **stats})
+                note({'file':name, 'source':source, **stats})
+        if log is not None:
+            with open(log, 'a') as stream:
+                order = 'mirror only' if mirror_only else 'mirror first' if mirror_first else 'hf first'
+                total = sum(f['size'] for f in data['files'].values())
+                stream.write(f"{time.strftime('%H:%M:%S')} start {len(data['files'])} files {total} bytes, {order}\n")
         tasks = [asyncio.create_task(one(name, f)) for name, f in data['files'].items()]
         try:
             await asyncio.gather(*tasks)

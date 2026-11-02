@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -154,6 +155,8 @@ class GuardWeightsTests(unittest.TestCase):
         digest.assert_not_called()
         # Same size, mtime put back: the marker no longer matches, so it hashes and refuses.
         path = self.root/REPO/REV/'config.json'
+        # File times come from a coarse kernel clock; let it tick past the parallel download.
+        time.sleep(0.05)
         before = path.stat()
         path.write_bytes(b'{"fixture": 1234}\n')
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
@@ -178,6 +181,17 @@ class GuardWeightsTests(unittest.TestCase):
         self.assertEqual(guard_weights.testing_value(env, 'GUARD_HF_URL', 'x'), 'x')
         with self.assertRaises(ValueError):
             guard_weights.mirror_base(env)
+
+    def test_files_download_in_parallel_and_land_in_the_log(self):
+        log = self.folder/'guards.log'
+        result = guard_weights.stage(dict(self.env, GUARD_WORKERS='2'), REPO, REV, self.root, timeout=5, log=log)
+        self.assert_staged(result)
+        lines = log.read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all(f'{REPO} mirror ' in line for line in lines))
+        self.assertNotIn('fixture-mirror-credential', log.read_text())
+        with self.assertRaises(ValueError):
+            guard_weights.stage(dict(self.env, GUARD_WORKERS='0'), REPO, REV, self.root)
 
     def test_committed_manifest_covers_both_pinned_guards(self):
         raw = json.loads(guard_weights.MANIFEST.read_text())

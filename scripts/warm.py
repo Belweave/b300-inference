@@ -163,7 +163,8 @@ class Warm:
     def weights(self):
         if self.env.get('MIRROR_URL'): public_url(self.env['MIRROR_URL'])
         records = asyncio.run(acquire(self.data, self.weights_dir,
-                              self.env.get('BASE_WEIGHTS_DIR','/mnt/nvme/models/dsv41'),self.end,self.env))
+                              self.env.get('BASE_WEIGHTS_DIR','/mnt/nvme/models/dsv41'),self.end,self.env,
+                              log=self.run/'weights.log'))
         with self.lock:
             self.record['transfers'] = records; self.save()
 

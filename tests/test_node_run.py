@@ -415,6 +415,8 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         reason = ('tunnel script ~/node-tunnel.sh missing or not executable' if 'script' in mode else
                   'CF_TUNNEL_TOKEN missing or empty in '+str(config))
         self.assertIn('FAIL preflight: '+reason, output)
+        if 'script' in mode:
+            self.assertIn(f'fix: install -m 755 {ROOT}/vendor/infer-gateway/node-tunnel.sh ~/node-tunnel.sh', output)
         self.assertIn('TEARDOWN BY', output)
         self.assertEqual(report['tunnel']['preflight']['status'], 'FAIL')
         self.assertNotIn('NODE READY FOR DRILL', output)

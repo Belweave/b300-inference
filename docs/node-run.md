@@ -58,11 +58,12 @@ directory, guard configuration, measurements and final decision.
      `GUARD_WEIGHTS_DIR/<repo>/<revision>/`. Every file is checked against
      `config/manifests/guards.json` (size and SHA256 for the pinned revision).
      A verified local copy is reused, so a rerun downloads nothing. Otherwise
-     each file comes from `$MIRROR_ORIGIN/models/<repo>/<revision>/` with
+     files download in parallel (`GUARD_WORKERS`, default 4) and each comes from `$MIRROR_ORIGIN/models/<repo>/<revision>/` with
      `MIRROR_AUTH_HEADER` and no redirects, then from Hugging Face at the same
      revision with no header. The mirror origin is `MIRROR_URL`'s scheme and
      host. `MIRROR_ONLY` covers the main model only, so a mirror outage cannot
      block the guards. If neither source verifies, preflight fails before warm.
+     Each finished file is logged to `runs/node-run-<id>/guards.log`.
 2. **warm-timeout:** use `WARM_TIMEOUT_SECONDS=3600` unless explicitly configured;
    cap it by the remaining absolute deadline, including warm's earlier bound.
 3. **key:** read the piped key without prompting or echoing.
@@ -135,6 +136,50 @@ qualification. A failed guard startup or final fit produces no handoff. GPU
 memory deltas can include concurrent serving-engine allocations; the final
 headroom check reads actual free memory again after load.
 
+## Watching a run
+
+From the Mac, while node-run is going:
+
+```sh
+ssh -t ubuntu@<node> '~/b300-inference/scripts/status.sh --loop'
+```
+
+Drop `--loop` for one screen. Add a number after it to change the redraw
+interval (default 2 seconds). It needs no `TERM`, `watch` or `tput`, and only
+clears the screen when it is writing to a terminal. It reads `nvidia-smi`, file
+sizes under `WEIGHTS_DIR` and `GUARD_WEIGHTS_DIR`, and the run reports, and never
+reads an env file. The ETA comes from the download rate between two samples.
+
+Logs, all under `~/b300-inference/runs/`:
+
+| File | Written by | When |
+| --- | --- | --- |
+| `node-run-<id>.json` | node-run | every gate, live |
+| `node-run-<id>/guards.log` | guard staging | one line per finished guard file |
+| `node-run-<id>/warm.log` | node-run | only after warm exits |
+| `node-run-<id>/tunnel.log` | node-run | after the tunnel helper runs |
+| `warm-<id>.json` | warm | every warm stage, live |
+| `warm-<id>/weights.log` | model download | start line, then one line per finished file |
+| `warm-<id>/operations.log` | warm | docker pull and other commands |
+| `warm-<id>/engine.log` | warm | engine output, live |
+
+There is no `rclone-prestage.log` in this flow. `runs/<id>/weights.log` from
+`bootstrap.sh` is a different, older path. The model download reports per file,
+so it is quiet while big shards stream; `status.sh` shows the bytes moving.
+
+The main model comes from the mirror first whenever `MIRROR_URL` and
+`MIRROR_AUTH_HEADER` are both set, with Hugging Face only for files the mirror
+lacks or fails. Without a header it keeps the old order (Hugging Face, then the
+mirror). `MIRROR_ONLY=1` still never touches Hugging Face.
+
+### mirror.env
+
+The mirror bearer lives in one line, either `Bearer <token>` or
+`Authorization: Bearer <token>` (a `MIRROR_AUTH_HEADER=` prefix is also accepted).
+It has a space in it, so never `source` it: the shell runs `Bearer` as a command.
+Set `MIRROR_ENV_FILE` (for example in `~/node.env`) and `node-env.sh` reads line 1
+as data into `MIRROR_AUTH_HEADER`. The file must be mode 600 and owned by you.
+
 ## Resume after a late failure
 
 Before this change, any failure after warm meant another 10 to 13 minute warm,
@@ -198,15 +243,15 @@ pinned image can serve the guards.
 
 ## Tunnel (required)
 
-From the Mac, before running node-run.sh:
+On the node, before running node-run.sh:
 
-```
-scp -P <port> -p vendor/infer-gateway/node-tunnel.sh <user@node>:~/
+```sh
+install -m 755 ~/b300-inference/vendor/infer-gateway/node-tunnel.sh ~/node-tunnel.sh
 ```
 
 `~/node.env` (mode 600) must define a non-empty `CF_TUNNEL_TOKEN`. Set it through a masked card; never paste the value in chat. node-run.sh sources it like Netops does (`set -a; . ~/node.env; set +a`) without echo, and passes the token only to `~/node-tunnel.sh`.
 
-Preflight hard-fails before any download or docker pull if `~/node-tunnel.sh` is missing or not executable, `CF_TUNNEL_TOKEN` is missing or empty, `sha256sum` is missing, or no verified cloudflared can be staged.
+Preflight hard-fails before any download or docker pull if `~/node-tunnel.sh` is missing or not executable (the message prints the `install` line above), `CF_TUNNEL_TOKEN` is missing or empty, `sha256sum` is missing, or no verified cloudflared can be staged.
 
 **cloudflared.** Preflight puts cloudflared 2026.10.7 at `/tmp/cloudflared` and checks its sha256 against the pin in `scripts/node_tunnel.py` (`CLOUDFLARED_SHA256` overrides it). It reuses a binary that already matches. Otherwise it downloads `tools/cloudflared/2026.10.7/cloudflared-linux-amd64` from the origin of `MIRROR_URL` (its scheme and host; `MIRROR_URL` itself is the model base) with the same `MIRROR_AUTH_HEADER` as the model download (no redirects followed), and only if that fails or does not match, the GitHub release of the same version. A file that does not match is deleted and never run. Netops' helper then sees a binary that matches its own pin and skips its download.
 

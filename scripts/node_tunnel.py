@@ -116,7 +116,12 @@ def prerequisites(env, token):
     script = Path(env['HOME'])/'node-tunnel.sh'
     result = {'status': 'FAIL', 'script': str(script), 'token_present': bool(token), 'missing_tools': []}
     if not script.is_file() or not os.access(script, os.X_OK):
-        result['reason'] = 'tunnel script ~/node-tunnel.sh missing or not executable'
+        helper = Path(__file__).resolve().parents[1]/'vendor/infer-gateway/node-tunnel.sh'
+        home = Path(env['HOME']).resolve()
+        if helper.is_relative_to(home):
+            helper = '~/'+str(helper.relative_to(home))
+        result['reason'] = ('tunnel script ~/node-tunnel.sh missing or not executable; '
+                            f'fix: install -m 755 {helper} ~/node-tunnel.sh')
     elif not token:
         result['reason'] = 'CF_TUNNEL_TOKEN missing or empty in '+env['NODE_ENV_FILE']
     elif not shutil.which('sha256sum', path=env.get('PATH')):

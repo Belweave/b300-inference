@@ -141,7 +141,8 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                 rows = await warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base', time.time()+30, env)
                 self.assertEqual((Path(folder)/'target/x.safetensors').read_bytes(), b'good')
             self.assertEqual([r['source'] for r in rows], ['mirror'])
-            self.assertEqual(len(calls), 3)
+            # With a credential the mirror goes first and HF is never asked.
+            self.assertEqual(len(calls), 2 if header else 3)
             for url, options in calls:
                 self.assertNotIn(VALUE, url)
                 if 'huggingface.co' in url or not header:
@@ -150,6 +151,31 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(options['headers'], mirror_auth.parse_mirror_auth(header).headers())
                     self.assertFalse(options['allow_redirects'])
                     self.assertNotIn(VALUE, repr(options))
+
+    async def test_authenticated_mirror_goes_first_and_hf_only_covers_its_failures(self):
+        for mirror_good in (True, False):
+            calls = []
+            class Session:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *args): pass
+                def get(self, url, **options):
+                    calls.append(url)
+                    if url.endswith('manifest.json'): return Response(obj=MIRROR)
+                    if 'huggingface.co' in url: return Response(body=b'good')
+                    return Response(body=b'good' if mirror_good else b'bad!')
+            env = {'MIRROR_URL': 'https://mirror.invalid', 'MIRROR_AUTH_HEADER': HEADER, 'MIN_MBPS': '1e9'}
+            with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
+                log = Path(folder)/'weights.log'
+                rows = await warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base',
+                                                   time.time()+30, env, log=log)
+                self.assertEqual((Path(folder)/'target/x.safetensors').read_bytes(), b'good')
+                text = log.read_text()
+            self.assertEqual([r['source'] for r in rows], ['mirror' if mirror_good else 'hf'])
+            self.assertFalse('huggingface.co' in calls[1])
+            self.assertEqual(len(calls), 2 if mirror_good else 3)
+            self.assertIn('start 1 files 4 bytes, mirror first', text)
+            self.assertIn(('mirror' if mirror_good else 'hf')+' x.safetensors 4 bytes', text)
+            self.assertNotIn(VALUE, text)
 
     async def test_mirror_errors_drop_raw_exception_context_and_headers(self):
         http_error = warm_download.aiohttp.ClientResponseError(

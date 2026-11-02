@@ -351,7 +351,8 @@ class NodeRun:
         import guard_weights
         for plan in self.guard_plans:
             try:
-                plan['weights'] = guard_weights.stage(self.env, plan['model'], plan['revision'], plan['cache_dir'])
+                plan['weights'] = guard_weights.stage(self.env, plan['model'], plan['revision'], plan['cache_dir'],
+                                                      log=self.run/'guards.log')
             except ValueError as exc:
                 raise GateFailure(str(exc)) from None
             self.save()
