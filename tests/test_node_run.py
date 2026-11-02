@@ -568,7 +568,7 @@ class PureNodeTests(unittest.TestCase):
             self.assertIn(image['image_ref'], p['argv'])
             self.assertEqual(p['argv'][p['argv'].index('--host')+1], '127.0.0.1')
             self.assertNotIn('--restart', p['argv'])
-            self.assertEqual(p['gpu'], 7)
+            self.assertEqual(p['gpu'], 0)
         for name in ('SAFETY_MODEL_REVISION', 'SAFETY_QWEN_REVISION'):
             with self.assertRaises(ValueError):
                 guards.plans({**env, name: 'main'}, image, 'rehearsal')

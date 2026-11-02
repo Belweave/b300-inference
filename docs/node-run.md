@@ -76,7 +76,7 @@ directory, guard configuration, measurements and final decision.
 
 Useful overrides: `RELAY_PUBLIC_URL` (default
 `https://infer-origin.belweave.tech`), `WEIGHTS_DIR`, `GUARD_WEIGHTS_DIR`,
-`GUARD_GPU=7`, `GUARD_SHIELD_MEM_FRACTION=0.06`, `GUARD_QWEN_MEM_FRACTION=0.02`,
+`GUARD_GPU=0`, `GUARD_SHIELD_MEM_FRACTION=0.06`, `GUARD_QWEN_MEM_FRACTION=0.02`,
 `GUARD_TIMEOUT_SECONDS=600`, `FIT_RANK_HEADROOM_MIB=4096`,
 `FIT_TOKENS_PER_STREAM=32768`, `LOADTEST_DURATION_SECONDS=60`.
 Disk planning defaults to `MIN_FREE_GB=550` minus existing manifest files, with

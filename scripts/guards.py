@@ -14,7 +14,7 @@ def plans(env, image, run_id):
         raise ValueError('node-run requires SAFETY=1 and both guards')
     if config.url != 'http://127.0.0.1:8600' or config.qwen_url != 'http://127.0.0.1:8601':
         raise ValueError('node-run guard URLs must be loopback ports 8600 and 8601')
-    gpu = int(env.get('GUARD_GPU', '7'))
+    gpu = int(env.get('GUARD_GPU', '0'))
     if gpu < 0:
         raise ValueError('GUARD_GPU must be a GPU index')
     cache = Path(env.get('GUARD_WEIGHTS_DIR', str(Path(env['WEIGHTS_DIR']).parent/'guards'))).absolute()
