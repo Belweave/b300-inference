@@ -1,0 +1,19 @@
+{
+  "scope": "Linux CPU process memory only; no VRAM measurement",
+  "processes": [
+    {
+      "guard": "shieldstral",
+      "pid": 20261,
+      "VmHWM": "8101988 kB",
+      "VmRSS": "8072704 kB",
+      "Threads": "29"
+    },
+    {
+      "guard": "qwen",
+      "pid": 20277,
+      "VmHWM": "2292676 kB",
+      "VmRSS": "2292676 kB",
+      "Threads": "36"
+    }
+  ]
+}

@@ -456,21 +456,20 @@ class OutputScoringTests(unittest.IsolatedAsyncioTestCase):
         self.minors.score.assert_awaited_once_with(['hello world'])
         self.qwen.score.assert_not_called()
 
-    async def test_qwen_below_threshold_never_confirms(self):
-        self.minors.score.side_effect = AssertionError('confirmation must not run')
+    async def test_qwen_false_negatives_cannot_bypass_minors_policy(self):
         for score in (0.0, 0.49):
             self.qwen.score.return_value = [score]
             self.assertEqual(await safety.score_text(self.scorer, 'hello world', 'output'),
-                             (False, score, self.config.qwen_model_id))
-        self.minors.score.assert_not_called()
+                             (True, 0.8, self.config.qwen_model_id+'+confirm:'+self.config.model_id))
+        self.assertEqual(self.minors.score.await_count, 2)
 
-    async def test_qwen_threshold_is_configurable(self):
+    async def test_qwen_threshold_cannot_disable_minors_confirmation(self):
         config = replace(self.config, qwen_threshold=0.75)
         scorer = replace(self.scorer, config=config)
         self.qwen.score.return_value = [0.5]
         self.assertEqual(await safety.score_text(scorer, 'hello world', 'output'),
-                         (False, 0.5, config.qwen_model_id))
-        self.minors.score.assert_not_called()
+                         (True, 0.8, config.qwen_model_id+'+confirm:'+config.model_id))
+        self.minors.score.assert_awaited_once()
 
     async def test_qwen_requires_minors_confirmation_and_reports_authoritative_score(self):
         # These are category scores, not actual sexual content. A low minors

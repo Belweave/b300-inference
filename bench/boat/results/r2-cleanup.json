@@ -1,0 +1,7 @@
+{
+  "bucket": "model-mirror",
+  "scope": "Only incomplete uploads for fully verified canonical keys initiated during this session",
+  "aborted_incomplete_uploads": 0,
+  "part_bytes": 0,
+  "objects": []
+}

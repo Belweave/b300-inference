@@ -1,0 +1,33 @@
+{
+  "platform": "Boat Linux x86_64, Python3.12.3",
+  "checks": [
+    {
+      "suite": "safety",
+      "tests": 50,
+      "result": "pass"
+    },
+    {
+      "suite": "warm",
+      "tests": 36,
+      "result": "pass"
+    },
+    {
+      "suite": "node-run",
+      "tests": 36,
+      "result": "pass"
+    },
+    {
+      "suite": "streaming-uploader",
+      "tests": 5,
+      "result": "pass"
+    },
+    {
+      "suite": "Linux bash-n, shellcheck, py_compile",
+      "result": "pass"
+    }
+  ],
+  "notes": [
+    "Deployment-target checks ran on Linux. Existing shell syntax and two warm timeout cases require modern Bash; macOS system Bash3.2 fails those checks.",
+    "GPU engine startup, B300 p99, throughput, and VRAM remain unqualified by this CPU exercise."
+  ]
+}

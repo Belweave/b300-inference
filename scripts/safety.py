@@ -1,9 +1,9 @@
 """Stateless node scorers; the gateway owns enforcement and evidence.
 
-Input uses only Shieldstral's minors policy. Output defaults to Qwen3Guard-Gen
-as a sexual-category first pass, followed by that same minors policy whenever
-Qwen signals sexual content. Qwen alone never blocks; a confirmation reports the
-authoritative minors score. Model errors propagate so the relay can fail closed.
+Input uses only Shieldstral's minors policy. Output runs Qwen3Guard-Gen and that
+same minors policy on every check. A low Qwen score cannot bypass Shieldstral.
+Qwen alone never blocks; confirmation reports the authoritative minors score.
+Model errors propagate so the relay can fail closed.
 
 The text-in/decision-out contract fits OpenAI-compatible Qwen3Guard-Gen-0.6B
 served by SGLang/vLLM. Qwen3Guard-Stream's token-level head needs a custom
@@ -293,8 +293,9 @@ async def score_text(scorer: SafetyScorer, text: str, phase: str) -> tuple[bool,
     backend = scorer.input_backend if phase == 'input' else scorer.output_backend
     score = await _score_one(backend, text)
     if qwen_output:
-        if score < config.qwen_threshold:
-            return False, score, model
+        # CPU live proxy evaluation found Qwen false negatives that skipped the
+        # minors judge. Always evaluate the authoritative policy, even when
+        # Qwen reports Safe or no sexual category. Keep Qwen failures closed.
         score = await _score_one(scorer.confirm_backend, text)
         model += '+confirm:' + config.model_id
     return score >= config.threshold, score, model

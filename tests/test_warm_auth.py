@@ -97,6 +97,34 @@ class AuthTests(unittest.TestCase):
 
 
 class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mirror_only_never_contacts_hf_even_if_mirror_fails(self):
+        for broken in (False, True):
+            calls = []
+            class Session:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *args): pass
+                def get(self, url, **options):
+                    calls.append(url)
+                    if 'huggingface.co' in url:
+                        raise AssertionError('mirror-only leaked a request to HF')
+                    if url.endswith('manifest.json'): return Response(obj=MIRROR)
+                    return Response(body=b'bad!' if broken else b'good')
+            with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
+                task = warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base',
+                                             time.time()+30, {'MIRROR_URL':'https://mirror.invalid','MIRROR_ONLY':'1'})
+                if broken:
+                    with self.assertRaises(mirror_auth.MirrorRequestError): await task
+                else:
+                    rows = await task
+                    self.assertEqual(rows[0]['source'], 'mirror')
+            self.assertEqual(len(calls), 2)
+
+    async def test_mirror_only_requires_mirror_before_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaises(ValueError):
+                await warm_download.acquire(MANIFEST, Path(folder), Path(folder)/'base',
+                                            time.time()+30, {'MIRROR_ONLY':'1'})
+
     async def test_manifest_and_shards_get_auth_but_hf_does_not(self):
         for header in (None, '', HEADER, 'Authorization: Bearer '+VALUE):
             calls = []

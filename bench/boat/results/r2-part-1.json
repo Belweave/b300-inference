@@ -1,0 +1,149 @@
+{
+  "bucket": "model-mirror",
+  "prefix": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/",
+  "revision": "c19ca5ca4eaeb79d29fdf08aea8327da95b1116a",
+  "objects": [
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00023-of-00048.safetensors",
+      "size": 7400713120,
+      "sha256": "8d24c353c12858c4d9679e0cd65a2810a516ba81e5f796594f0121542ecd95c1",
+      "etag": "\"1929b16f74eeb78d8cc33cc6646790fe-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 103.81971824399989
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00039-of-00048.safetensors",
+      "size": 7395337416,
+      "sha256": "81a03ab52e6e4ba0d70a753b94207f1eaac8e22afcd490ad379e57b08c70fcbf",
+      "etag": "\"f430f92598f3eaee1860293bee391c09-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 118.50609572799999
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00016-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "976e0637f96a14766d359630ca3954a2c4b2d35232cda69098ace22ea3d39b95",
+      "etag": "\"9c1c3a7035a478906a3e3693e9ae15ba-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 75,
+      "source_sha256_verified": false,
+      "seconds": 480.3216443629999
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00021-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "f6c361c464bd33bdcee0455af38e3cb0f4a33208b3afd244456145e3cef6bd55",
+      "etag": "\"d2cf720076952f4657c4394a263b088f-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 293.7170811769997
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00026-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "13725c111b872accf410d864ac71564e2d6eca8909eb78c2a724801679efcda7",
+      "etag": "\"0709a86d0a6586d8342910a6fe31cc55-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 339.9800659540001
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00032-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "74adc9fe907cf7bd947be6f2759cf392cbdb1fc6ee4d4e5caebb97092eaabe1f",
+      "etag": "\"9b9826199f25f857cf31dc9162e6de11-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 416.4531241740001
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00037-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "09e3f25c8d4ea7c1d9946fb8e7061053b0083849d510bc92ab49f234ab85518a",
+      "etag": "\"497656ab4f701885760704785a404c9a-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 280.7232976170003
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00042-of-00048.safetensors",
+      "size": 7389761368,
+      "sha256": "3d283a4ed6eb2d5013bacc97c3500361926a3261957943434513304df52adfd7",
+      "etag": "\"948baed3a3e3a74cdd507e6c8644ebd8-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 290.639143675
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00007-of-00048.safetensors",
+      "size": 7389759032,
+      "sha256": "24856942add8f73f5e1fbaea1e9c9b6ff597fd1b4aa4651d789833dd3a5a2ab9",
+      "etag": "\"2f3c21debce292bfa458a30c68a9fdab-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 295.0792682710003
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00012-of-00048.safetensors",
+      "size": 7389759032,
+      "sha256": "4f97bf292f58178ecdf593b55252a401d6e9102f18625a4fccc52b8ee57e7be0",
+      "etag": "\"e2e519ac33f220ed96fd548fd20f013b-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 317.1053017770005
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00002-of-00048.safetensors",
+      "size": 1323858272,
+      "sha256": "43616eebd88dd4f1f1b642772356fc160478d1d9d04edd240431e7d065d2eda7",
+      "etag": "\"b1cbbef7ef09f17f310d650dd25d2109-20\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 17,
+      "source_sha256_verified": false,
+      "seconds": 56.83458463599982
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/tokenizer.json",
+      "size": 6367257,
+      "sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+      "etag": "\"3ac09d5ce862ca5dbaf4b5699bd33ab5-1\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 2.638405098000476
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00047-of-00048.safetensors",
+      "size": 101535150936,
+      "sha256": "76a05106ece259be83d1bfea0dcb54f23377864ee60fd321690f35e6698a2af5",
+      "etag": "\"ea37d35de73dbc356ed7eb09a21265db-1513\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 504,
+      "source_sha256_verified": false,
+      "seconds": 3059.9796850300004
+    }
+  ],
+  "complete": false,
+  "verification": "full object size + SHA256 readback",
+  "partition_count": 4,
+  "partition_index": 1,
+  "partition_complete": true
+}

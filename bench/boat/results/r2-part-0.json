@@ -1,0 +1,149 @@
+{
+  "bucket": "model-mirror",
+  "prefix": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/",
+  "revision": "c19ca5ca4eaeb79d29fdf08aea8327da95b1116a",
+  "objects": [
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00011-of-00048.safetensors",
+      "size": 7405953784,
+      "sha256": "5df968edefe59033e451ff8512bef57da2cf97b57b4e7a1380118489dd02915b",
+      "etag": "\"cc779fb3d5e0b906dd1a1093a6465e24-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 110.55887787200004
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00035-of-00048.safetensors",
+      "size": 7395337416,
+      "sha256": "a0f5034220f5bc2e7190062d1ab104a8546240daa7822f16097be1e625c37955",
+      "etag": "\"87fc8c88b7f84b8c2dc10bba16e23f3c-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 111.58964277999985
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00015-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "f4407707d1e20fa40ef26b25e9fea00027abe940d3c56237f6c4e90429c05bcb",
+      "etag": "\"745fdd52232b9fdf2accbeda17acbae0-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 492.54678512299984
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00020-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "fbddaf8d00ffc09b3bba0771678c6f79c4b4a8be19bc8e95cd3a1e7603f2b59f",
+      "etag": "\"368b6c9153e8eee5686f0d448966b2bc-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 348.39327793099983
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00025-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "afaae8f7c89bc63a7c73d4497f42451b5a960f0e3cf9a86402473f8b78534d62",
+      "etag": "\"5b36ba52dee9debf114eea947f04709b-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 357.8289561390002
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00030-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "7eeb62aed14bbe0829e87763ee67b0a431875ae645fc0685c3ab1f6ff03591a9",
+      "etag": "\"176a89acd349c7b2f78b76c243b7bc4a-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 374.3944029930003
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00036-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "9036f932cbda264f92376dca5598705363c0dd16255a99e4e864de41612cc6ac",
+      "etag": "\"817fce546ba18241ae6189300f071db0-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 288.0409132049999
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00041-of-00048.safetensors",
+      "size": 7389761368,
+      "sha256": "458308f08ed29b34850bd6b9d10bf769620729d3725c77f7bc0c1d14e01b47cc",
+      "etag": "\"4a532415427721c6cabda66d8b4fb4f5-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 344.6072389629999
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00006-of-00048.safetensors",
+      "size": 7389759032,
+      "sha256": "a5d42afde2aee33619fb7a674b4c737c38d1f1d47a636a26f3edfb3b54164167",
+      "etag": "\"10990d114a7387ae31e68858ba119888-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 328.9949941589998
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00010-of-00048.safetensors",
+      "size": 7389759032,
+      "sha256": "835e9a8b0a28cc571cb1cf9e6014b3d5eb84ac41990a8aa4519e1ac435d7e23c",
+      "etag": "\"73981f03be660ab7d1d971fe70bfe907-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 304.07461729399984
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00045-of-00048.safetensors",
+      "size": 2573998176,
+      "sha256": "9c73b27c4343236790008979d5e0b565f687aa64440031b9e096fed1ab8039c5",
+      "etag": "\"ec96cdbf28590b1e299917adaf4e1d3e-39\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 14,
+      "source_sha256_verified": false,
+      "seconds": 99.92257062200042
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model.safetensors.index.json",
+      "size": 7470294,
+      "sha256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+      "etag": "\"6989852cc83c486bddfb51a761e6e117-1\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 0.7877719909993175
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00048-of-00048.safetensors",
+      "size": 101537926640,
+      "sha256": "9dc51433e195bc78b5ad846b68643cc0351d3b174e5e4309222d3b7402c83afd",
+      "etag": "\"bf24184e419625f5349716dd7a166de9-1514\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 338,
+      "source_sha256_verified": false,
+      "seconds": 3450.706431044
+    }
+  ],
+  "complete": false,
+  "verification": "full object size + SHA256 readback",
+  "partition_count": 4,
+  "partition_index": 0,
+  "partition_complete": true
+}
