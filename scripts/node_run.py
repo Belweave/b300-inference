@@ -83,6 +83,7 @@ class NodeRun:
         self.lock = None
         self.warm_report = None
         self.current = None
+        self.load = None
 
     def safe(self, text):
         return redact(text, self.secrets)
@@ -212,12 +213,14 @@ class NodeRun:
             raise GateFailure('test overrides require NODE_RUN_TESTING=1')
         # Hard gate before even docker info, and before downloads/pulls/warm.
         self.tunnel_preflight()
-        self.env.update(SAFETY='1', SSE_RELAY='1', LAYOUT='tp8', NODE_RUN_STDIN='1',
+        # Owner-approved private test only: no guards, relay passes through, gateway keys unchanged.
+        self.private = self.env.get('PRIVATE_UNGUARDED') == '1'
+        self.env.update(SAFETY='0' if self.private else '1', SSE_RELAY='1', LAYOUT='tp8', NODE_RUN_STDIN='1',
                         NODE_RUN_BENIGN_SMOKE='1', FALLBACK_MAX_RUNNING_REQUESTS='64')
         self.env.setdefault('WEIGHTS_DIR', '/mnt/nvme/models/dsv41-uncensored')
         self.env.setdefault('MAX_RUNNING_REQUESTS', '128')
         # Guards share GPU 7 (0.06 + 0.02). Leave the engine the same headroom it has without them.
-        self.env.setdefault('MEM_FRACTION', '0.76')
+        self.env.setdefault('MEM_FRACTION', '0.85' if self.private else '0.76')
         if self.env['MAX_RUNNING_REQUESTS'] not in ('128', '64'):
             raise GateFailure('MAX_RUNNING_REQUESTS must be 128 or 64')
         if not self.env.get('INFER_UPSTREAM_KEY'):
@@ -267,13 +270,17 @@ class NodeRun:
         self.record['ports'] = {'relay': 8000, 'engine': engine_port, 'guards': [8600, 8601]}
         self.disk_check()
         import guards
-        try:
-            self.guard_plans = guards.plans(self.env, self.image, self.id)
-        except ValueError as exc:
-            raise GateFailure(str(exc)) from None
-        if self.guard_plans[0]['gpu'] >= expected:
-            raise GateFailure('GUARD_GPU is outside the GPU inventory')
-        self.record['guards'] = self.guard_plans
+        if self.private:
+            self.guard_plans, self.guard_vram = [], 0
+            self.record['guards'] = 'skipped: PRIVATE_UNGUARDED=1'
+        else:
+            try:
+                self.guard_plans = guards.plans(self.env, self.image, self.id)
+            except ValueError as exc:
+                raise GateFailure(str(exc)) from None
+            if self.guard_plans[0]['gpu'] >= expected:
+                raise GateFailure('GUARD_GPU is outside the GPU inventory')
+            self.record['guards'] = self.guard_plans
         self.url = self.env.get('NODE_RUN_RELAY_URL', 'http://127.0.0.1:8000').rstrip('/')
         from safety import validate_url
         validate_url(self.url)
@@ -592,6 +599,9 @@ class NodeRun:
             ('relay-safety', lambda: asyncio.run(self.relay_safety())),
             ('kv-pool', self.pool), ('loadtest', self.loadtest), ('fit', self.fit),
         ):
+            if getattr(self, 'private', False) and name in ('guards', 'relay-safety', 'loadtest', 'fit'):
+                self.say(f'SKIP {name} (PRIVATE_UNGUARDED=1: no CSAM block, private key only)')
+                continue
             with self.gate(name):
                 action()
         with self.gate('handoff'):
@@ -601,7 +611,7 @@ class NodeRun:
         # The gate writes its final timing before the final literal check.
         self.check_key_leak()
         self.say(f'NODE READY FOR DRILL relay={self.public_url} local=http://127.0.0.1:8000 '
-                 f'fit={self.current} p99_ms={self.load.p99_ms:.2f} '
+                 f'fit={self.current} p99_ms={self.load.p99_ms if self.load else float("nan"):.2f} '
                  f'guard_vram_mib={self.guard_vram} report={self.path}')
         self.start_tunnel()
         with self.gate('key-leak', check_deadline=False):

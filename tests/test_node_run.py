@@ -98,7 +98,7 @@ assert all('eyJ'+'A'*60 not in arg for arg in sys.argv)
 key = sys.stdin.readline().rstrip('\r\n')
 assert key == 'rehearsal-only-9d0b1d2a'
 assert sys.argv[1:3] == ['--layout', 'tp8']
-assert os.environ['SAFETY'] == '1'
+assert os.environ['SAFETY'] == ('0' if os.environ.get('PRIVATE_UNGUARDED') == '1' else '1')
 state = Path(os.environ['FAKE_STATE'])
 limit = int(os.environ['MAX_RUNNING_REQUESTS'])
 if os.environ.get('FAKE_WARM_FALLBACK') == '1':
@@ -367,6 +367,14 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row['limit'] for row in launches], [128, 64])
         self.assertIn('--resume-at-64', launches[1]['args'])
         self.assertEqual([row['concurrency'] for row in report['measurements']['loadtests']], [128, 64])
+
+    async def test_private_unguarded_skips_guards_and_reaches_handoff(self):
+        code, output, report = await self.invoke(PRIVATE_UNGUARDED='1')
+        self.assertEqual(code, 0, output)
+        self.assertIn('SKIP guards', output)
+        self.assertIn('NODE READY', output)
+        self.assertEqual(report['guards'], 'skipped: PRIVATE_UNGUARDED=1')
+        self.assertFalse((self.folder/'state'/'guards').exists() if (self.folder/'state').exists() else False)
 
     async def test_guard_rank_headroom_falls_back(self):
         code, output, report = await self.invoke(FAKE_HEADROOM='1')
