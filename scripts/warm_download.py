@@ -133,6 +133,12 @@ async def fetch(session, url, target, f, floor, end, *, mirror=False, auth=None)
 
 async def acquire(data, root, base, end, env):
     auth = parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
+    mirror_only = env.get('MIRROR_ONLY', '0')
+    if mirror_only not in ('0', '1'):
+        raise ValueError('MIRROR_ONLY must be 0 or 1')
+    mirror_only = mirror_only == '1'
+    if mirror_only and not env.get('MIRROR_URL', '').rstrip('/'):
+        raise ValueError('MIRROR_ONLY requires MIRROR_URL')
     root, base = Path(root), Path(base)
     if root.resolve() == base.resolve(): raise ValueError('Target must be separate from base')
     root.mkdir(parents=True, exist_ok=True)
@@ -155,6 +161,8 @@ async def acquire(data, root, base, end, env):
                 return verify_mirror(data, await response.json())
             mirror_files = await mirror_request(session, mirror+'/'+revision+'/manifest.json', auth, consume_manifest,
                                                timeout=aiohttp.ClientTimeout(total=min(30,max(.01,end-time.time()))))
+            if mirror_only and set(data['files']) != set(mirror_files):
+                raise ValueError('MIRROR_ONLY requires all canonical files in the mirror manifest')
         async def check(path, f):
             async with hashes:
                 return await asyncio.to_thread(verified, path, f, cache, env.get('FORCE_HASH') == '1')
@@ -178,13 +186,17 @@ async def acquire(data, root, base, end, env):
                         raise ValueError('Reused shard failed verification')
                     records.append({'file':name, 'source':mode}); return
                 url = 'https://huggingface.co/'+data['model']['repo']+'/resolve/'+revision+'/'+quote(name)
-                try:
-                    stats = await fetch(session, url, target, f, float(env.get('MIN_MBPS','0')), end)
-                    source = 'hf'
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-                    if name not in mirror_files: raise
+                if mirror_only:
                     stats = await fetch(session, mirror+'/'+revision+'/'+quote(name), target, f, 0, end, mirror=True, auth=auth)
                     source = 'mirror'
+                else:
+                    try:
+                        stats = await fetch(session, url, target, f, float(env.get('MIN_MBPS','0')), end)
+                        source = 'hf'
+                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                        if name not in mirror_files: raise
+                        stats = await fetch(session, mirror+'/'+revision+'/'+quote(name), target, f, 0, end, mirror=True, auth=auth)
+                        source = 'mirror'
                 remember(target, f, cache)
                 records.append({'file':name, 'source':source, **stats})
         tasks = [asyncio.create_task(one(name, f)) for name, f in data['files'].items()]

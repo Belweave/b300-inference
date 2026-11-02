@@ -1,0 +1,143 @@
+{
+  "bucket": "model-mirror",
+  "prefix": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/",
+  "revision": "c19ca5ca4eaeb79d29fdf08aea8327da95b1116a",
+  "objects": [
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00031-of-00048.safetensors",
+      "size": 7395337416,
+      "sha256": "e3b6d4e6ce833e29ca2481ff142e12b16fe0917502a2500cb1339c9aa3853612",
+      "etag": "\"07152d22005e4cda0e78e6243a4f24fe-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 96.38688480499968
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00005-of-00048.safetensors",
+      "size": 7405953784,
+      "sha256": "c5df71c02d6a22bcb20a0dbbcda9c6b65aa104f44415102a9a6a03bee92bb9de",
+      "etag": "\"1278933219660843f3968aee8d58ac1e-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 188.64426047599954
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00014-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "532cf21b4b2271d333e6956e2bd0e521cb3625fc402f25059b18b91753238b99",
+      "etag": "\"ce05ad29bb9a0c9a2fecd9cc32240970-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 118.80751445199985
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00019-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "c3094fad7fe92f8e047028f7a82a7cde8842129a1d58c0124b5ce03ca427875c",
+      "etag": "\"21f65536f9e60720d3621a204c2fb76f-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 120.71600496499923
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00024-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "743f63bf59f0f524e0baf7648fee94f45388250375da8b30731bc863c61e7107",
+      "etag": "\"a0faf7b7d0033b14521d2a44af6df8c7-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 300.7813915930001
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00034-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "7001cd285c20e629d5f35a1a8cc8e8b31e0f0b239b23eb8444c53b0f3411b95f",
+      "etag": "\"197ae355d1e07bb131cb61176c648ddd-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 315.5662309290001
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00029-of-00048.safetensors",
+      "size": 7389761400,
+      "sha256": "471df79b8e256f1fd4416aa204959b2113a5673a3aa2097c775c63dca30486cb",
+      "etag": "\"c71cfb220d956a0e4fd9f6e9ac78b719-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 686.799835408
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00040-of-00048.safetensors",
+      "size": 7389761368,
+      "sha256": "6a9dbcc8d5894ba614b5e962764f45f6d0df7f14f1287b17f173d1f2cd762186",
+      "etag": "\"402b1df442504519db56a42ca646dfb0-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 225.51602413199998
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00009-of-00048.safetensors",
+      "size": 7389759032,
+      "sha256": "e6ae47e9daca138fda8c04f833c8328eb21671c37d1c8e2c3f7a82aac26649f6",
+      "etag": "\"6f42806b2edee972ebecdaa28645e0be-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 257.84692305499993
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00044-of-00048.safetensors",
+      "size": 2652728736,
+      "sha256": "3e8ac315c2bcca3e83c5e6e25c5758a75c03732063a6ff0c1b0e24b9ff49f6e6",
+      "etag": "\"3b11ebb71b76de04f168a31450884f86-40\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 81.92577613000049
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00004-of-00048.safetensors",
+      "size": 7389759032,
+      "sha256": "e8e901b3cb1ab46f32729c7eaab37bd774a09094f0a02c51a60e883f779f2c39",
+      "etag": "\"6d9b7fdfcbfe3a36f41fcdba2df676eb-111\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": false,
+      "resumed_parts": 0,
+      "source_sha256_verified": true,
+      "seconds": 405.8959560200001
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/tokenizer_config.json",
+      "size": 801,
+      "sha256": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
+      "etag": "\"46eb899524a4f87e5b1b3e114680f454-1\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 0.9570537619993047
+    },
+    {
+      "key": "models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/c19ca5ca4eaeb79d29fdf08aea8327da95b1116a/model-00001-of-00048.safetensors",
+      "size": 970533624,
+      "sha256": "13bd121075f0b68cb7e8e8021a1011d42a81a83f557a2602fd9c07d52fddb0ec",
+      "etag": "\"a85ad8c203004c4d21caebabe77342af-15\"",
+      "verified": "full-authenticated-worker-readback",
+      "reused": true,
+      "seconds": 10.608299882999745
+    }
+  ],
+  "complete": false,
+  "verification": "full object size + SHA256 readback",
+  "partition_count": 4,
+  "partition_index": 3,
+  "partition_complete": true
+}

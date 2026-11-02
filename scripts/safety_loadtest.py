@@ -96,6 +96,8 @@ async def drive(client, endpoint, rps, concurrency, duration_seconds, config=Non
                     valid = valid_response(body, canary)
                     if config is not None:  # Preserve exact offline mock assertions.
                         model = config.model_id if phase == 'input' else config.qwen_model_id
+                        if phase == 'output' and not canary:
+                            model += '+confirm:' + config.model_id
                         valid = valid and body == {'flag': canary, 'score': 1.0 if canary else 0.01, 'model': model}
                     return 'ok' if valid else 'invalid'
         try:

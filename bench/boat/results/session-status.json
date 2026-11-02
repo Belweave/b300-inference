@@ -1,0 +1,39 @@
+{
+  "state": "complete",
+  "branch": "boat-staging-validation",
+  "boat_login": "authenticated; confirmed by successful sandbox creation/execution",
+  "cpu_correctness": {
+    "cases": 144,
+    "tp": 48,
+    "fn": 0,
+    "fp": 0,
+    "tn": 96,
+    "precision": 1.0,
+    "recall": 1.0,
+    "backend_errors": 0,
+    "scope": "synthetic category-label proxies only; wrapper holdout shares base records",
+    "gpu_performance": "pending GPU node"
+  },
+  "r2": {
+    "bucket": "model-mirror",
+    "model_objects": 52,
+    "model_bytes": 510310550839,
+    "verification": "full authenticated Worker SHA256+size, fresh R2 size/ETag checks",
+    "manifest_published": true,
+    "cloudflared": "2026.10.7 amd64 verified against committed pin through Worker",
+    "parent_token_revocation": "ready; Netops owns revocation"
+  },
+  "cleanup": {
+    "all_task_sandboxes_inactive": true,
+    "no_snapshots": true,
+    "task_sandboxes": [
+      "bx_dz934h98",
+      "bx_zym9sut3",
+      "bx_av5se853",
+      "bx_9gzsd4su",
+      "bx_hrwrdh4a"
+    ],
+    "temporary_secret_files_removed": true,
+    "checked_at_utc": "2026-11-02T03:03:56.569978+00:00"
+  }
+}
