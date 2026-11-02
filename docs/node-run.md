@@ -43,28 +43,44 @@ directory, guard configuration, measurements and final decision.
 1. **preflight:** load node env quietly; require exactly eight B300s, Docker and
    aiohttp; fetch and verify cloudflared (see Tunnel); clean up after earlier
    runs (see Cleanup); check ports 8000, the engine port (8001), 8600 and 8601;
-   require a pinned engine image and guard revisions; check the weight
-   filesystem. `ALLOW_UNPINNED` cannot permit a launch.
+   require a pinned engine image and guard revisions; check disk; then stage
+   both guards. On `RESUME` the main weights disk check is skipped, as before,
+   but the guard disk check and staging still run. With the files already
+   verified, the guard need is 0 and nothing downloads.
+   `ALLOW_UNPINNED` cannot permit a launch.
+   - **Disk:** the guard need is the size of every manifest file that is
+     missing or doesn't verify under `GUARD_WEIGHTS_DIR`, plus 1 GB. It is 0
+     when all files already verify. If the guards and `WEIGHTS_DIR` share a
+     filesystem, the requirement is the weights need plus the guard need, checked
+     once. Too little room for the guards always fails, before any download.
+     `DISK_SPACE_ACTION=warn` relaxes only the main model's budget.
+   - **Guard staging:** each guard goes into
+     `GUARD_WEIGHTS_DIR/<repo>/<revision>/`. Every file is checked against
+     `config/manifests/guards.json` (size and SHA256 for the pinned revision).
+     A verified local copy is reused, so a rerun downloads nothing. Otherwise
+     each file comes from `$MIRROR_ORIGIN/models/<repo>/<revision>/` with
+     `MIRROR_AUTH_HEADER` and no redirects, then from Hugging Face at the same
+     revision with no header. The mirror origin is `MIRROR_URL`'s scheme and
+     host. `MIRROR_ONLY` covers the main model only, so a mirror outage cannot
+     block the guards. If neither source verifies, preflight fails before warm.
 2. **warm-timeout:** use `WARM_TIMEOUT_SECONDS=3600` unless explicitly configured;
    cap it by the remaining absolute deadline, including warm's earlier bound.
 3. **key:** read the piped key without prompting or echoing.
 4. **warm:** foreground `warm.sh --layout tp8`; require one successful READY
    signal and matching pinned image. Its existing KV/OOM fallback may select 64.
    This path uses only `hello world` for warm smoke inputs and skips prefix replay.
-5. **guards:** stage each guard's files into
-   `GUARD_WEIGHTS_DIR/<repo>/<revision>/`, then launch both detached guard
-   containers from that same image, bound to loopback 8600/8601. Every file is
-   checked against `config/manifests/guards.json` (size and SHA256 for the
-   pinned revision). A verified local copy is reused. Otherwise each file comes
-   from `$MIRROR_ORIGIN/models/<repo>/<revision>/` with `MIRROR_AUTH_HEADER` and
-   no redirects, then from Hugging Face at the same revision with no header. The
-   mirror origin is `MIRROR_URL`'s scheme and host. `MIRROR_ONLY` covers the main
-   model only, so a mirror outage cannot block the guards. If neither source
-   verifies, the gate fails before any guard starts. The container mounts the
-   staged dir read-only with `HF_HUB_OFFLINE=1` and `--served-model-name` set to
-   the repo id, so nothing downloads at launch. Measure per-GPU memory before/after and collect
-   compute-process memory when supported. Both guards must become healthy, then
-   pass the guard benchmark (below).
+5. **guards:** launch both detached guard containers from that same image,
+   bound to loopback 8600/8601, only from the dirs preflight staged. Each file
+   is checked again first. A marker written after hashing (SHA256 plus size,
+   times and inode) makes this cheap. A file changed within a second of its
+   marker is hashed again. Any edit since preflight forces a rehash,
+   and a mismatch fails the gate before a container starts. The container mounts
+   the staged dir read-only with `HF_HUB_OFFLINE=1` and `--served-model-name`
+   set to the repo id, so nothing downloads at launch. Measure per-GPU memory
+   before/after and collect compute-process memory when supported. Both guards
+   must become healthy, then pass the guard benchmark (below). On `RESUME`, a
+   guard container that is still running and healthy is kept and not rechecked;
+   any guard that has to be relaunched is.
 6. **relay-safety:** for both phases, require benign authenticated false,
    unauthenticated 401, and the existing inert canary true.
 7. **kv-pool:** parse the engine log using `warm_logic.parse_pool`; require both
@@ -96,8 +112,9 @@ Useful overrides: `RELAY_PUBLIC_URL`, `WEIGHTS_DIR`, `GUARD_WEIGHTS_DIR`,
 Disk planning defaults to `MIN_FREE_GB=550` minus existing manifest files, with
 at least 20 GB free. `DISK_SPACE_ACTION=warn` permits proceeding below that
 threshold; the default is `fail`. Existing file sizes reduce the estimate only;
-warm still verifies checksums. Allow separate space for Docker layers and the
-staged guards (about 17 GB).
+warm still verifies checksums. The guards are about 17 GB when nothing is
+staged yet; preflight adds that need as described above. Allow separate space
+for Docker layers.
 
 `DRY_RUN=1 ./scripts/node-run.sh` prints the gate plan without reading node env or
 stdin, probing hardware/network, or creating files. Test-only overrides require

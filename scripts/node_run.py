@@ -25,6 +25,17 @@ from serve_plan import front_port, image_reference, require_pinned
 from warm_logic import concurrency_fit, parse_pool, tunnel_slot
 
 ROOT = Path(__file__).resolve().parents[1]
+GUARD_DISK_MARGIN = 1_000_000_000
+
+
+def nearest(path):
+    """The closest existing ancestor, which is where a not-yet-created dir will live."""
+    path = Path(path).absolute()
+    while not path.exists():
+        path = path.parent
+    return path
+
+
 LATE = ('guards', 'relay-safety', 'kv-pool', 'loadtest', 'fit', 'tunnel')
 GATES = ('preflight', 'warm-timeout', 'key', 'warm', *LATE, 'handoff', 'key-leak')
 # RESUME=<run id> proves the original engine is still the one serving, then reruns only LATE.
@@ -306,7 +317,6 @@ class NodeRun:
             # A resume relies on what is still running; a fresh run starts clean.
             self.clean_stale()
             self.ports_free((8000, engine_port, 8600, 8601))
-            self.disk_check()
         import guards
         if self.private:
             self.guard_plans, self.guard_vram = [], 0
@@ -319,6 +329,8 @@ class NodeRun:
             if self.guard_plans[0]['gpu'] >= expected:
                 raise GateFailure('GUARD_GPU is outside the GPU inventory')
             self.record['guards'] = self.guard_plans
+        # A resume keeps the engine's weights as they are, but the guard files still get checked.
+        self.disk_check(guards_only=self.resuming)
         self.url = self.env.get('NODE_RUN_RELAY_URL', 'http://127.0.0.1:8000').rstrip('/')
         from safety import validate_url
         validate_url(self.url)
@@ -332,6 +344,28 @@ class NodeRun:
         self.headroom = number(self.env, 'FIT_RANK_HEADROOM_MIB', 4096)
         self.tokens = number(self.env, 'FIT_TOKENS_PER_STREAM', 32768, integer=True)
         self.context = number(self.env, 'CONTEXT_LENGTH', 262144, integer=True)
+        # Last in preflight, before warm: a mirror or HF problem shows up in minutes, not after 510 GB.
+        self.stage_guards()
+
+    def stage_guards(self):
+        import guard_weights
+        for plan in self.guard_plans:
+            try:
+                plan['weights'] = guard_weights.stage(self.env, plan['model'], plan['revision'], plan['cache_dir'])
+            except ValueError as exc:
+                raise GateFailure(str(exc)) from None
+            self.save()
+            self.say(f"guard weights {plan['model']}: {plan['weights']['sources']}")
+
+    def guard_need(self):
+        import guard_weights
+        try:
+            need = sum(guard_weights.missing_bytes(self.env, p['model'], p['revision'], p['cache_dir'])
+                       for p in self.guard_plans)
+        except ValueError as exc:
+            raise GateFailure(str(exc)) from None
+        # Room for filesystem overhead; nothing extra when every file already verifies.
+        return need+GUARD_DISK_MARGIN if need else 0
 
     def clean_stale(self):
         """Remove our leftovers from an earlier run: engine and guard containers, and the relay."""
@@ -360,25 +394,40 @@ class NodeRun:
                                           'that is not ours; stop it and rerun') from None
                     time.sleep(0.2)
 
-    def disk_check(self):
+    def disk_check(self, guards_only=False):
         from warm_download import load_manifest
         weights = Path(self.env['WEIGHTS_DIR'])
         existing = sum(min((weights/name).stat().st_size, info['size'])
                        for name, info in load_manifest()['files'].items() if (weights/name).is_file())
-        parent = weights
-        while not parent.exists():
-            parent = parent.parent
         needed = max(20e9, number(self.env, 'MIN_FREE_GB', 550)*1e9-existing)
-        free = shutil.disk_usage(parent).free
+        guards_needed = self.guard_need()
+        guard_root = Path(self.guard_plans[0]['cache_dir']) if self.guard_plans else weights
+        weights_fs, guards_fs = nearest(weights), nearest(guard_root)
+        shared = weights_fs.stat().st_dev == guards_fs.stat().st_dev
+        free = shutil.disk_usage(weights_fs).free
+        guards_free = free if shared else shutil.disk_usage(guards_fs).free
         mode = self.env.get('DISK_SPACE_ACTION', 'fail')
         if mode not in ('warn', 'fail'):
             raise GateFailure('DISK_SPACE_ACTION must be warn or fail')
-        self.record['measurements']['disk'] = {'free_bytes': free, 'required_bytes': needed,
-                                               'existing_bytes': existing, 'action': mode}
+        guard_disk = {'guard_free_bytes': guards_free, 'guard_required_bytes': guards_needed, 'shared_filesystem': shared}
+        if guards_only:
+            self.record['resumes'][-1]['disk'] = guard_disk
+        else:
+            self.record['measurements']['disk'] = {'free_bytes': free, 'required_bytes': needed,
+                                                   'existing_bytes': existing, 'action': mode, **guard_disk}
+        # The guards must fit no matter what; DISK_SPACE_ACTION only relaxes the main model's budget.
+        if guards_free < guards_needed:
+            raise GateFailure(f'insufficient free space for guard weights: need {guards_needed/1e9:.1f} GB, '
+                              f'{guards_free/1e9:.1f} GB free')
+        if guards_only:
+            return
+        if shared:
+            needed += guards_needed
         if free < needed:
+            what = 'weights and guard weights (same filesystem)' if shared and guards_needed else 'weights directory'
             if mode == 'fail':
-                raise GateFailure('insufficient free space at weights directory')
-            self.say('WARNING: free space at weights directory is below configured threshold')
+                raise GateFailure('insufficient free space at '+what)
+            self.say('WARNING: free space at '+what+' is below configured threshold')
 
     def attach(self):
         """RESUME: fail closed unless the original engine is provably the one still serving."""
@@ -557,23 +606,25 @@ class NodeRun:
 
     def guards(self):
         import guard_weights
-        # Stage both before launching either, so a failed pull never leaves a guard running.
-        for plan in self.guard_plans:
-            try:
-                plan['weights'] = guard_weights.stage(self.env, plan['model'], plan['revision'], plan['cache_dir'])
-            except ValueError as exc:
-                raise GateFailure(str(exc)) from None
-            self.save()
-            self.say(f"guard weights {plan['model']}: {plan['weights']['sources']}")
         before = self.memory()
         processes_before = self.processes()
         previous = (self.record.get('guard_bench') or {}).get('guards', {})
         vram, reused = {}, []
+        # A resume keeps guards that are still running and healthy; their weights are already loaded.
+        launch = []
         for plan in self.guard_plans:
             if self.resuming and self.reuse_guard(plan):
                 reused.append(plan['name'])
                 vram[plan['name']] = previous.get(plan['name'], {}).get('vram_mib')
-                continue
+            else:
+                launch.append(plan)
+        # Preflight staged these. Check again (cheap with markers) so nothing unverified loads.
+        for plan in launch:
+            try:
+                guard_weights.verify(self.env, plan['model'], plan['revision'], plan['cache_dir'])
+            except ValueError as exc:
+                raise GateFailure(str(exc)) from None
+        for plan in launch:
             argv = list(plan['argv'])
             fraction = self.guard_fraction(plan)
             argv[argv.index('--mem-fraction-static')+1] = str(fraction)
@@ -887,7 +938,7 @@ def main():
         print('DRY RUN: no env files, stdin reads, probes, directories, containers or tunnels.')
         for name in GATES:
             print('PLAN '+name)
-        print('Plan: pinned TP8 warm; two pinned loopback guards from verified local weights; 130 rps; 128 or one fallback to 64.')
+        print('Plan: pinned TP8 warm; two pinned loopback guards, staged and verified in preflight; 130 rps; 128 or one fallback to 64.')
         print('Plan: preflight cleans stale containers and our relay, stages a verified cloudflared; tunnel is a hard gate before handoff.')
         print('Plan: a late failure keeps the engine up and prints RESUME=<run id> to rerun only the late gates.')
         print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; no automatic restarts.')

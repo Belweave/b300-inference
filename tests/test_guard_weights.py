@@ -2,11 +2,13 @@
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
@@ -138,6 +140,32 @@ class GuardWeightsTests(unittest.TestCase):
         result = self.stage()
         self.assertEqual(result['sources'], {'verified-local': 1, 'mirror': 1})
         self.assert_staged(result)
+
+    def test_markers_make_relaunch_cheap_and_still_catch_edits(self):
+        total = sum(len(b) for b in FILES.values())
+        self.assertEqual(guard_weights.missing_bytes(self.env, REPO, REV, self.root), total)
+        # Markers written "later" than the files, as on a node where warm sits between the two checks.
+        later = guard_weights.time_ns()+10_000_000_000
+        with patch('guard_weights.time_ns', return_value=later):
+            self.stage()
+        self.assertEqual(guard_weights.missing_bytes(self.env, REPO, REV, self.root), 0)
+        with patch('guard_weights.hashlib.sha256') as digest:
+            guard_weights.verify(self.env, REPO, REV, self.root)
+        digest.assert_not_called()
+        # Same size, mtime put back: the marker no longer matches, so it hashes and refuses.
+        path = self.root/REPO/REV/'config.json'
+        before = path.stat()
+        path.write_bytes(b'{"fixture": 1234}\n')
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.assertRaises(ValueError):
+            guard_weights.verify(self.env, REPO, REV, self.root)
+        # A fresh marker never vouches for a file changed in the same ctime tick.
+        path.write_bytes(FILES['config.json'])
+        guard_weights.verify(self.env, REPO, REV, self.root)
+        path.write_bytes(b'{"fixture": 1234}\n')
+        with self.assertRaises(ValueError):
+            guard_weights.verify(self.env, REPO, REV, self.root)
+        self.assertEqual(guard_weights.missing_bytes(self.env, REPO, REV, self.root), len(FILES['config.json']))
 
     def test_no_mirror_uses_hf_and_unpinned_revision_is_refused(self):
         del self.env['MIRROR_URL']
