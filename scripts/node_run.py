@@ -385,11 +385,11 @@ class NodeRun:
             rows = None
         return {'available': rows is not None, 'processes': rows}
 
-    async def guards_healthy(self):
+    async def guards_healthy(self, plans=None):
         import aiohttp
         until = time.monotonic()+min(self.remaining(), number(self.env, 'GUARD_TIMEOUT_SECONDS', 600))
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2), trust_env=False) as session:
-            for plan in self.guard_plans:
+            for plan in (self.guard_plans if plans is None else plans):
                 url = self.env.get('NODE_RUN_GUARD_HEALTH_URL', f"http://127.0.0.1:{plan['port']}")
                 from safety import validate_url
                 validate_url(url)
@@ -403,18 +403,43 @@ class NodeRun:
                         pass
                     _, state = self.command(['docker', 'inspect', plan['name'], '--format', '{{.State.Running}}'])
                     if state.strip() != 'true':
-                        raise GateFailure('guard container exited before health')
+                        self.guard_log(plan)
+                        raise GateFailure(plan['name']+' exited before health; see guard_logs in the report')
                     await asyncio.sleep(min(1, max(0, until-time.monotonic())))
                 else:
+                    self.guard_log(plan)
                     raise GateFailure('guard health timeout')
+
+    def guard_log(self, plan):
+        _, state = self.command(['docker', 'inspect', plan['name'], '--format',
+                                 '{{.State.ExitCode}} {{.State.OOMKilled}} {{json .State.Error}}'], check=False)
+        _, tail = self.command(['docker', 'logs', '--tail', '200', plan['name']], check=False, merge_output=True)
+        self.record.setdefault('guard_logs', {})[plan['name']] = {'state': self.safe(state.strip()), 'tail': self.safe(tail[-20000:])}
+        self.save()
+
+    def guard_fraction(self, plan):
+        """sglang sizes --mem-fraction-static against the whole GPU and assumes the rest is free.
+        GPU 7 already holds an engine rank, so turn the guard's budget into the fraction that
+        leaves exactly what is free now minus that budget."""
+        row = self.memory()[plan['gpu']]
+        budget = int(plan['mem_fraction_static']*row['total_mib'])+2048
+        if row['free_mib'] < budget+1024:
+            self.say(f"WARNING: GPU {plan['gpu']} has {row['free_mib']} MiB free; {plan['name']} wants {budget+1024}")
+            return plan['mem_fraction_static']
+        return round(1-(row['free_mib']-budget)/row['total_mib'], 4)
 
     def guards(self):
         before = self.memory()
         processes_before = self.processes()
         for plan in self.guard_plans:
             Path(plan['cache_dir']).mkdir(parents=True, exist_ok=True)
-            self.command(plan['argv'], timeout=120)
-        asyncio.run(self.guards_healthy())
+            argv = list(plan['argv'])
+            fraction = self.guard_fraction(plan)
+            argv[argv.index('--mem-fraction-static')+1] = str(fraction)
+            plan['effective_mem_fraction_static'] = fraction; self.save()
+            self.command(argv, timeout=120)
+            # One at a time, so the second guard sizes itself against what the first left.
+            asyncio.run(self.guards_healthy([plan]))
         after = self.memory()
         delta = [{'index': a['index'], 'guard_vram_mib': a['used_mib']-b['used_mib']}
                  for b, a in zip(before, after)]

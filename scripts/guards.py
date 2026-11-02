@@ -30,7 +30,7 @@ def plans(env, image, run_id):
             raise ValueError(label+' mem fraction must be between 0 and 1')
         name = run_id.lower()+'-'+label
         args = ['docker', 'run', '-d', '--name', name, '--gpus', f'device={gpu}',
-                '--network', 'host', '--ipc', 'host', '--log-driver', 'none',
+                '--network', 'host', '--ipc', 'host', '--log-driver', 'json-file', '--log-opt', 'max-size=20m',
                 '--mount', f'type=bind,src={cache},dst=/guard-cache',
                 '--env', 'HF_HOME=/guard-cache', '--entrypoint', 'python3', image['image_ref'],
                 '-m', 'sglang.launch_server', '--model-path', model, '--revision', revision,
