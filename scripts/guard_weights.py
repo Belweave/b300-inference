@@ -134,7 +134,10 @@ def stage(env, repo, revision, root, timeout=60):
         for name, base, headers, redirects in sources:
             try:
                 ok = fetch(base+quote(f['filename']), headers, redirects, tmp, f, timeout)
-            except Exception:
+            except Exception as exc:
+                # An HTTP error holds its response open; close it, but report nothing from it.
+                if hasattr(exc, 'close'):
+                    exc.close()
                 ok = False
                 failed.append(f"{name}: {f['filename']} download failed")
             else:

@@ -919,6 +919,7 @@ class PureNodeTests(unittest.TestCase):
                 env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE,
                        'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1', 'FAKE_STATE': folder,
                        'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch, staged=False),
+                       **cloudflared_env(scratch),
                        'MIRROR_URL': 'http://127.0.0.1:9/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
                        'DISK_SPACE_ACTION': action, 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'fixture',
                        'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN}
