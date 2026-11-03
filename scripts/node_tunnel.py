@@ -205,26 +205,18 @@ def registered(path, offset):
     return False
 
 
-async def reachable(url, until, private=False):
+async def reachable(url, until):
     import aiohttp
     # No Authorization, cookies, proxy environment or redirects. A 401 from the
-    # relay (or, with PRIVATE_UNGUARDED=1, the engine) proves the request reached
-    # the application rather than an edge error page.
+    # relay proves the request reached the application rather than an edge error page.
     async with aiohttp.ClientSession(trust_env=False, cookie_jar=aiohttp.DummyCookieJar()) as session:
         while (remaining := until-time.monotonic()) > 0:
             timeout = aiohttp.ClientTimeout(total=min(3, remaining))
             try:
-                if private:
-                    # Without SAFETY the relay has no /v1/safety/csam route; that path
-                    # would 404 forever, which is how a live tunnel looked like a timeout.
-                    async with session.get(url+'/v1/models', allow_redirects=False, timeout=timeout) as response:
-                        if response.status == 401:
-                            return True
-                else:
-                    async with session.post(url+'/v1/safety/csam', json={'text': 'hello world', 'phase': 'input'},
-                                            allow_redirects=False, timeout=timeout) as response:
-                        if response.status == 401 and await response.json() == {'error': 'unauthorized'}:
-                            return True
+                async with session.post(url+'/v1/safety/csam', json={'text': 'hello world', 'phase': 'input'},
+                                        allow_redirects=False, timeout=timeout) as response:
+                    if response.status == 401 and await response.json() == {'error': 'unauthorized'}:
+                        return True
             except (aiohttp.ClientError, OSError, asyncio.TimeoutError, ValueError):
                 pass
             await asyncio.sleep(min(2, max(0, until-time.monotonic())))

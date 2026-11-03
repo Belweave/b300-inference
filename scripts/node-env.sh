@@ -37,7 +37,9 @@ if [[ ${DRY_RUN:-0} != 1 && -n ${MIRROR_ENV_FILE:-} ]]; then
     unset mirror_line
 fi
 # Read-only R2 S3 creds for the model-mirror bucket (KEY=VALUE lines). Parsed as data,
-# never sourced or echoed; only the names below are exported.
+# never sourced or echoed; only the names below are exported. Netops writes a fresh
+# file at each boot; ~/mirror-s3.env is used when node.env names none.
+if [[ -z ${MIRROR_S3_ENV_FILE:-} && -n ${HOME:-} && -f $HOME/mirror-s3.env ]]; then MIRROR_S3_ENV_FILE=$HOME/mirror-s3.env; fi
 # shellcheck disable=SC2088
 if [[ ${MIRROR_S3_ENV_FILE:-} == '~/'* ]]; then MIRROR_S3_ENV_FILE="$HOME/${MIRROR_S3_ENV_FILE:2}"; fi
 if [[ ${DRY_RUN:-0} != 1 && -n ${MIRROR_S3_ENV_FILE:-} ]]; then

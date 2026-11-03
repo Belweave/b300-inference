@@ -3,8 +3,39 @@
 Run from the operator machine, with the existing classifier key as stdin:
 
 ```sh
-ssh <node> 'cd ~/b300-inference && ./scripts/node-run.sh' < /path/to/classifier-key
+ssh <node> 'cd ~/b300-inference && ./scripts/boot.sh' < /path/to/classifier-key
 ```
+
+## One-command boot
+
+`./scripts/boot.sh` is the production boot: download, warm, serve.
+
+1. **Download.** Guard weights in preflight, main weights in warm. Both come
+   straight from the R2 mirror bucket over S3, with `User-Agent: b300-inference`,
+   and every file is checked for size and SHA256 against the pinned manifest.
+   Files that already verify are skipped.
+2. **Warm.** The pinned TP8 engine, exactly as `node-run.sh` has always run it.
+3. **Serve.** Tunnel, then both guards. The guards always load; there is no
+   unguarded mode, and `PRIVATE_UNGUARDED` is refused in preflight. Handoff then
+   asks each guard for `GET /health` with a 2 second timeout. Any guard that is
+   slow, down or not 200 fails the run closed: no `NODE READY`, and the relay keeps
+   answering 503 for checks that need a missing guard.
+
+Nothing is tested unless asked. `--with-tests` (or `RUN_TESTS=1`, same as
+`--calibrate` and `CALIBRATE=1`) adds the one-time suite below.
+
+Rerunning is safe. If the newest run's engine container is still running,
+boot.sh prints `RESUMING <run id>` and resumes that run (see Resume) instead of
+cleaning up and warming again. A run that already reached ready only re-verifies
+the guards, tunnel and handoff, even if it was a test run. If the engine is gone,
+boot.sh starts a fresh run. `node-run.sh` is the same runner without the
+automatic resume.
+
+Netops' boot-time credentials arrive as files, never arguments. The read-only
+mirror creds go in the file named by `MIRROR_S3_ENV_FILE`, or `~/mirror-s3.env`
+when node.env names none (mode 600, owned by you, parsed as data). The SGLang
+admin key needs nothing from anyone: serve_group makes a random one inside the
+container on every launch. None of these values are printed or written to `runs/`.
 
 ## Steady boot and calibration
 
@@ -12,12 +43,13 @@ ssh <node> 'cd ~/b300-inference && ./scripts/node-run.sh' < /path/to/classifier-
 verifies both guards), warm (which downloads and verifies the main model), tunnel,
 guards, handoff. It tests nothing. The guards always load, from the verified
 weights, and the second one starts once the first has loaded, because each sizes
-its memory against what is free on GPU 0. Nothing waits for the second guard. Until both
+its memory against what is free on GPU 0. The run waits for each to load, and
+handoff checks both again with a 2 second timeout. Until both
 answer, the relay returns 503 for any check that needs a missing guard, so
 traffic is refused, never served unguarded. Downloads keep their SHA256 checks.
 They hash while streaming, and a rerun reads markers, so they add no extra pass.
 
-`./scripts/node-run.sh --calibrate` (or `CALIBRATE=1`) runs the one-time suite
+`./scripts/node-run.sh --calibrate` (or `--with-tests`, `CALIBRATE=1`, `RUN_TESTS=1`) runs the one-time suite
 described below: guard benchmark and canary, relay-safety, kv-pool, load test,
 fit with the single 64 fallback, and the public tunnel probe. Run it by hand for
 a new node type, guard revision, engine image or serving config. Nothing starts
@@ -31,7 +63,7 @@ it to whatever the last calibration decided.
 
 The numbered gates below are the calibration run. Steady runs gates 1 to 4,
 then the tunnel without the public probe, then guards without the benchmark,
-then handoff and key-leak.
+then handoff (with the guard health check) and key-leak.
 
 ## Supervised run
 
@@ -315,9 +347,9 @@ Preflight hard-fails before any download or docker pull if `~/node-tunnel.sh` is
 
 **cloudflared.** Preflight puts cloudflared 2026.10.7 at `/tmp/cloudflared` and checks its sha256 against the pin in `scripts/node_tunnel.py` (`CLOUDFLARED_SHA256` overrides it). It reuses a binary that already matches. Otherwise it downloads `tools/cloudflared/2026.10.7/cloudflared-linux-amd64` from the origin of `MIRROR_URL` (its scheme and host; `MIRROR_URL` itself is the model base) with the same `MIRROR_AUTH_HEADER` as the model download (no redirects followed), and only if that fails or does not match, the GitHub release of the same version. A file that does not match is deleted and never run. Netops' helper then sees a binary that matches its own pin and skips its download.
 
-**Readiness.** After fit, the tunnel gate runs the helper (60 s cap), then waits up to `TUNNEL_CONNECT_TIMEOUT` (180 s) for `Registered tunnel connection` in the part of `/tmp/cloudflared.log` written after launch, failing early if cloudflared exits. Then it probes the public URL without credentials: a `POST /v1/safety/csam` that the relay answers with 401, or with `PRIVATE_UNGUARDED=1`, a `GET /v1/models` that the engine answers with 401. It prints `TUNNEL UP url=...` or fails the gate with the reason (`tunnel helper failed`, `helper timeout`, `cloudflared exited before registering a connection`, `registered no edge connection`, or `connected but the public URL never reached the relay`). A tunnel failure keeps the engine and prints the RESUME command. `/tmp/cloudflared.log` is raw and unredacted; do not share it.
+**Readiness.** After fit, the tunnel gate runs the helper (60 s cap), then waits up to `TUNNEL_CONNECT_TIMEOUT` (180 s) for `Registered tunnel connection` in the part of `/tmp/cloudflared.log` written after launch, failing early if cloudflared exits. Then it probes the public URL without credentials: a `POST /v1/safety/csam` that the relay answers with 401. It prints `TUNNEL UP url=...` or fails the gate with the reason (`tunnel helper failed`, `helper timeout`, `cloudflared exited before registering a connection`, `registered no edge connection`, or `connected but the public URL never reached the relay`). A tunnel failure keeps the engine and prints the RESUME command. `/tmp/cloudflared.log` is raw and unredacted; do not share it.
 
-**Why it said `TUNNEL NOT STARTED reason=timeout` before.** That one reason covered three different cases: no time left before the deadline, a helper that ran past the wait, and a launched tunnel whose public probe never passed. The probe only accepted a relay 401 on `/v1/safety/csam`. With `PRIVATE_UNGUARDED=1` the relay runs without SAFETY and has no such route, so the request passed through to the engine, which does not answer with the relay's `{"error": "unauthorized"}` 401. A working tunnel would still report `timeout`. The 180 s wait also included the helper's cloudflared download from GitHub. Now the download happens in preflight, readiness comes from cloudflared's own log, private runs probe a path the engine answers, and each case has its own reason. On the next node, check that the engine really answers `401` to a keyless `/v1/models` through the relay.
+**Why it said `TUNNEL NOT STARTED reason=timeout` before.** That one reason covered three different cases: no time left before the deadline, a helper that ran past the wait, and a launched tunnel whose public probe never passed. The probe only accepted a relay 401 on `/v1/safety/csam`. With `PRIVATE_UNGUARDED=1` the relay runs without SAFETY and has no such route, so the request passed through to the engine, which does not answer with the relay's `{"error": "unauthorized"}` 401. A working tunnel would still report `timeout`. The 180 s wait also included the helper's cloudflared download from GitHub. Now the download happens in preflight, readiness comes from cloudflared's own log, and each case has its own reason. The unguarded mode is gone, so the probe always goes to the relay's own route.
 
 ## Time budget (estimates, 3.125 h = 187.5 min credit cap)
 

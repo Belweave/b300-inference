@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import time
 
+from node_tunnel import USER_AGENT
+
 # The main model is staged without its HF org; the guards keep theirs.
 MAIN_PREFIX = 'models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8'
 CHUNK = 64*1024*1024
@@ -46,7 +48,7 @@ def client(env):
     return boto3.client('s3', endpoint_url=env['AWS_ENDPOINT_URL'], region_name=env.get('AWS_REGION') or 'auto',
                         aws_access_key_id=env['AWS_ACCESS_KEY_ID'], aws_secret_access_key=env['AWS_SECRET_ACCESS_KEY'],
                         config=Config(max_pool_connections=128, retries={'max_attempts': 8, 'mode': 'adaptive'},
-                                      signature_version='s3v4'))
+                                      signature_version='s3v4', user_agent=USER_AGENT))
 
 
 def transfer_config(env):

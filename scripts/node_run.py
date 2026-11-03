@@ -37,11 +37,12 @@ def nearest(path):
     return path
 
 
-# Default boot: download, warm, tunnel, start the guards, serve. Nothing is tested;
-# a guard that is not up yet makes the relay answer 503, so nothing is served unguarded.
+# Default boot: download, warm, tunnel, start the guards, serve. Nothing is tested.
+# The guards always load, and handoff refuses to call the node ready until each one
+# answers /health within GUARD_HEALTH_TIMEOUT. Until then the relay answers 503.
 STEADY_LATE = ('tunnel', 'guards')
 STEADY_GATES = ('preflight', 'warm-timeout', 'key', 'warm', *STEADY_LATE, 'handoff', 'key-leak')
-# --calibrate (or CALIBRATE=1): the one-time suite. Run it for a new node type, guard
+# --calibrate or --with-tests (or CALIBRATE=1, RUN_TESTS=1): the one-time suite. Run it for a new node type, guard
 # revision, engine image or serving config. Nothing triggers it automatically.
 LATE = ('guards', 'relay-safety', 'kv-pool', 'loadtest', 'fit', 'tunnel')
 GATES = ('preflight', 'warm-timeout', 'key', 'warm', *LATE, 'handoff', 'key-leak')
@@ -55,6 +56,9 @@ PORTS = {8000: 'relay', 8001: 'engine', 8600: 'shieldstral guard', 8601: 'qwen g
 BENCH_TEXTS = ('hello world', 'What is the capital of France?', 'Write a haiku about the ocean.',
                'Summarize: the team meeting moved to Tuesday at noon.')
 CREDENTIALS = ('SAFETY_CLASSIFIER_KEY', 'CF_TUNNEL_TOKEN', 'TUNNEL_TOKEN')
+# A loaded guard answers /health in about 1 s. Anything slower fails handoff.
+GUARD_HEALTH_TIMEOUT = 2.0
+TEST_FLAGS = ('--calibrate', '--with-tests')
 
 
 class GateFailure(Exception):
@@ -89,7 +93,7 @@ def provisioned(value, now):
 class NodeRun:
     def __init__(self, calibrate=False):
         self.env = dict(os.environ)
-        self.calibrate = calibrate or self.env.get('CALIBRATE') == '1'
+        self.calibrate = calibrate or wants_tests(self.env)
         for name in CREDENTIALS:
             self.env.pop(name, None)
             os.environ.pop(name, None)
@@ -107,7 +111,9 @@ class NodeRun:
         if self.resuming:
             self.attach_record(self.env['RESUME'])
             # A resume finishes the run it started as; older records are all calibration runs.
-            self.calibrate = self.calibrate or self.record.get('mode', 'calibrate') == 'calibrate'
+            # A run that already reached ready has nothing left to test, so it only re-verifies.
+            unfinished = self.resumed_state != 'ready'
+            self.calibrate = self.calibrate or (unfinished and self.record.get('mode', 'calibrate') == 'calibrate')
             self.record['mode'] = self.mode
             return
         self.id = 'node-run-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
@@ -136,6 +142,7 @@ class NodeRun:
             raise GateFailure('RESUME run record is missing or unreadable') from None
         if not self.run.is_dir():
             raise GateFailure('RESUME run directory is missing')
+        self.resumed_state = self.record.get('state')
         self.record.update(state='running', failure_reason=None)
         self.record.setdefault('resumes', []).append({'started_epoch': self.started})
 
@@ -275,14 +282,15 @@ class NodeRun:
             raise GateFailure('test overrides require NODE_RUN_TESTING=1')
         # Hard gate before even docker info, and before downloads/pulls/warm.
         self.tunnel_preflight()
-        # Owner-approved private test only: no guards, relay passes through, gateway keys unchanged.
-        self.private = self.env.get('PRIVATE_UNGUARDED') == '1'
-        self.env.update(SAFETY='0' if self.private else '1', SSE_RELAY='1', LAYOUT='tp8', NODE_RUN_STDIN='1',
+        # The guards always load. There is no unguarded serving mode.
+        if self.env.get('PRIVATE_UNGUARDED', '0') != '0':
+            raise GateFailure('PRIVATE_UNGUARDED is not supported: the guards always load')
+        self.env.update(SAFETY='1', SSE_RELAY='1', LAYOUT='tp8', NODE_RUN_STDIN='1',
                         NODE_RUN_BENIGN_SMOKE='1', FALLBACK_MAX_RUNNING_REQUESTS='64')
         self.env.setdefault('WEIGHTS_DIR', '/mnt/nvme/models/dsv41-uncensored')
         self.env.setdefault('MAX_RUNNING_REQUESTS', '128')
         # Guards share GPU 0 with an engine rank (0.06 + 0.02). Leave the engine the same headroom it has without them.
-        self.env.setdefault('MEM_FRACTION', '0.85' if self.private else '0.76')
+        self.env.setdefault('MEM_FRACTION', '0.76')
         if self.env['MAX_RUNNING_REQUESTS'] not in ('128', '64'):
             raise GateFailure('MAX_RUNNING_REQUESTS must be 128 or 64')
         if not self.env.get('INFER_UPSTREAM_KEY'):
@@ -342,17 +350,13 @@ class NodeRun:
             self.clean_stale()
             self.ports_free((8000, engine_port, 8600, 8601))
         import guards
-        if self.private:
-            self.guard_plans, self.guard_vram = [], 0
-            self.record['guards'] = 'skipped: PRIVATE_UNGUARDED=1'
-        else:
-            try:
-                self.guard_plans = guards.plans(self.env, self.image, self.id)
-            except ValueError as exc:
-                raise GateFailure(str(exc)) from None
-            if self.guard_plans[0]['gpu'] >= expected:
-                raise GateFailure('GUARD_GPU is outside the GPU inventory')
-            self.record['guards'] = self.guard_plans
+        try:
+            self.guard_plans = guards.plans(self.env, self.image, self.id)
+        except ValueError as exc:
+            raise GateFailure(str(exc)) from None
+        if self.guard_plans[0]['gpu'] >= expected:
+            raise GateFailure('GUARD_GPU is outside the GPU inventory')
+        self.record['guards'] = self.guard_plans
         self.record['fingerprint'] = self.fingerprint()
         # A resume keeps the engine's weights as they are, but the guard files still get checked.
         self.disk_check(guards_only=self.resuming)
@@ -437,7 +441,7 @@ class NodeRun:
                        for name, info in load_manifest()['files'].items() if (weights/name).is_file())
         needed = max(20e9, number(self.env, 'MIN_FREE_GB', 550)*1e9-existing)
         guards_needed = self.guard_need()
-        guard_root = Path(self.guard_plans[0]['cache_dir']) if self.guard_plans else weights
+        guard_root = Path(self.guard_plans[0]['cache_dir'])
         weights_fs, guards_fs = nearest(weights), nearest(guard_root)
         shared = weights_fs.stat().st_dev == guards_fs.stat().st_dev
         free = shutil.disk_usage(weights_fs).free
@@ -609,6 +613,21 @@ class NodeRun:
                     self.guard_log(plan)
                     raise GateFailure('guard health timeout')
 
+    def check_guards(self):
+        """Last word before ready: every guard answers /health within GUARD_HEALTH_TIMEOUT, or no handoff."""
+        from safety import validate_url
+        checks = {}
+        for plan in self.guard_plans:
+            url = self.env.get('NODE_RUN_GUARD_HEALTH_URL', f"http://127.0.0.1:{plan['port']}").rstrip('/')
+            validate_url(url)
+            started = time.monotonic()
+            code = http_status(url+'/health', timeout=GUARD_HEALTH_TIMEOUT)
+            checks[plan['name']] = {'http': code, 'seconds': round(time.monotonic()-started, 3)}
+            if code != 200:
+                self.record['guard_health'] = checks
+                raise GateFailure(f"{plan['name']} did not answer /health within {GUARD_HEALTH_TIMEOUT:g} s; not serving")
+        self.record['guard_health'] = checks
+
     def guard_log(self, plan):
         _, state = self.command(['docker', 'inspect', plan['name'], '--format',
                                  '{{.State.ExitCode}} {{.State.OOMKilled}} {{json .State.Error}}'], check=False)
@@ -662,13 +681,12 @@ class NodeRun:
         self.command(argv, timeout=120)
 
     def start_guards(self):
-        """Steady state: load both guards and move on. Each sizes its memory against what is
-        free on its GPU, so the second starts once the first has loaded; nothing waits on the second."""
+        """Steady state: load both guards, one after the other, since each sizes its memory
+        against what is free on its GPU. Wait for each to load; handoff checks them again."""
         launch = self.launchable()
-        for i, plan in enumerate(launch):
+        for plan in launch:
             self.launch_guard(plan)
-            if i < len(launch)-1:
-                asyncio.run(self.guards_healthy([plan]))
+            asyncio.run(self.guards_healthy([plan]))
         self.record['guards_started'] = [p['name'] for p in launch]
         self.guard_vram = None  # Measured only when calibrating.
 
@@ -877,7 +895,7 @@ class NodeRun:
                     raise GateFailure('tunnel registered no edge connection within TUNNEL_CONNECT_TIMEOUT')
                 time.sleep(0.5)
             result['registered_seconds'] = time.monotonic()-started
-            if self.calibrate and not asyncio.run(node_tunnel.reachable(self.tunnel_url, until, private=self.private)):
+            if self.calibrate and not asyncio.run(node_tunnel.reachable(self.tunnel_url, until)):
                 raise GateFailure('tunnel connected but the public URL never reached the relay')
         except GateFailure as exc:
             result.update(status='not up', reason=str(exc))
@@ -906,12 +924,10 @@ class NodeRun:
             late = (('tunnel', self.tunnel), ('guards', self.guards))
         self.say('MODE '+self.mode)
         for name, action in early+late:
-            if getattr(self, 'private', False) and name in ('guards', 'relay-safety', 'loadtest', 'fit'):
-                self.say(f'SKIP {name} (PRIVATE_UNGUARDED=1: no CSAM block, private key only)')
-                continue
             with self.gate(name):
                 action()
         with self.gate('handoff'):
+            self.check_guards()
             if not self.calibrate:
                 self.record.update(decision=self.current, decision_reason='steady: warm effective concurrency, not load-tested')
             self.record.update(state='ready', ended_epoch=time.time())
@@ -972,13 +988,14 @@ def stop(pid, wait=5):
         pass
 
 
-def http_status(url, key):
+def http_status(url, key=None, timeout=5):
     import urllib.error
     import urllib.request
     # Loopback only; the key goes in a header, never a URL or log line.
-    request = urllib.request.Request(url, headers={'Authorization': 'Bearer '+key})
+    request = urllib.request.Request(url, headers={'Authorization': 'Bearer '+key} if key else {})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), node_tunnel.NoRedirect())
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
+        with opener.open(request, timeout=timeout) as response:
             return response.status
     except urllib.error.HTTPError as exc:
         return exc.code
@@ -993,12 +1010,38 @@ def percentile(values, fraction):
     return round(values[max(0, math.ceil(fraction*len(values))-1)], 2)
 
 
+def wants_tests(env):
+    return env.get('CALIBRATE') == '1' or env.get('RUN_TESTS') == '1'
+
+
+def live_run():
+    """The newest run, if its engine container is still running; otherwise None.
+
+    Only the newest run counts: a fresh run removes every older engine in preflight."""
+    reports = sorted(p for p in (ROOT/'runs').glob('node-run-*.json') if RUN_ID.fullmatch(p.stem))
+    if not reports:
+        return None
+    try:
+        record = json.loads(reports[-1].read_text())
+        name = record['warm_runs'][-1]['ready']['container']
+    except (OSError, ValueError, LookupError, TypeError):
+        return None
+    if not isinstance(name, str) or not name.startswith('b300-warm-'):
+        return None
+    try:
+        state = subprocess.run(['docker', 'inspect', name, '--format', '{{.State.Running}}'], capture_output=True,
+                               text=True, timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return reports[-1].stem if state.returncode == 0 and state.stdout.strip() == 'true' else None
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv not in ([], ['--calibrate']):
-        print('usage: node-run.sh [--calibrate]', flush=True)
+    if argv not in ([], *([flag] for flag in TEST_FLAGS)):
+        print('usage: node-run.sh [--with-tests | --calibrate]', flush=True)
         return 2
-    calibrate = argv == ['--calibrate'] or os.environ.get('CALIBRATE') == '1'
+    calibrate = bool(argv) or wants_tests(os.environ)
     if os.environ.get('DRY_RUN') == '1':
         print('DRY RUN: no env files, stdin reads, probes, directories, containers or tunnels.')
         print('MODE '+('calibrate' if calibrate else 'steady'))
@@ -1008,11 +1051,18 @@ def main(argv=None):
             print('Plan: pinned TP8 warm; two pinned loopback guards, staged and verified in preflight; 130 rps; 128 or one fallback to 64.')
         else:
             print('Plan: pinned TP8 warm; tunnel; load both guards from verified weights; no benchmark, canary, load test or fit.')
+        print('Plan: handoff only after every guard answers /health within 2 s; otherwise fail closed.')
         print('Plan: preflight cleans stale containers and our relay, stages a verified cloudflared; tunnel is a hard gate before handoff.')
         print('Plan: a late failure keeps the engine up and prints RESUME=<run id> to rerun only the late gates.')
         print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; after serving, the engine restarts itself up to 3 times on a crash.')
         return 0
     os.umask(0o077)
+    # boot.sh sets AUTO_RESUME=1: a rerun picks up a live engine instead of tearing it down.
+    if os.environ.get('AUTO_RESUME') == '1' and not os.environ.get('RESUME'):
+        run_id = live_run()
+        if run_id:
+            print(f'RESUMING {run_id}: its engine is still up, so only the late gates run again', flush=True)
+            os.environ['RESUME'] = run_id
     try:
         runner = NodeRun(calibrate)
     except GateFailure as exc:

@@ -93,6 +93,12 @@ elif sys.argv[1] == 'run':
     assert any('@sha256:' in arg for arg in sys.argv)
     (state/'guards').touch()
     print('fake-container')
+elif sys.argv[1] == 'inspect' and '--format' in sys.argv and sys.argv[2].startswith('b300-warm-'):
+    # The engine container's running state, as warm.sh left it.
+    path = state/'inspect.json'
+    if not path.exists():
+        sys.exit(1)
+    print(str(json.loads(path.read_text())[0]['State']['Running']).lower())
 elif sys.argv[1] == 'inspect' and '--format' in sys.argv:
     # Guard containers exist only once one has been run.
     if not (state/'guards').exists():
@@ -116,7 +122,7 @@ assert all('eyJ'+'A'*60 not in arg for arg in sys.argv)
 key = sys.stdin.readline().rstrip('\r\n')
 assert key == 'rehearsal-only-9d0b1d2a'
 assert sys.argv[1:3] == ['--layout', 'tp8']
-assert os.environ['SAFETY'] == ('0' if os.environ.get('PRIVATE_UNGUARDED') == '1' else '1')
+assert os.environ['SAFETY'] == '1'
 state = Path(os.environ['FAKE_STATE'])
 limit = int(os.environ['MAX_RUNNING_REQUESTS'])
 if os.environ.get('FAKE_WARM_FALLBACK') == '1':
@@ -231,6 +237,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_get('/v1/models', self.models)
         app.router.add_get('/models/{tail:.*}', self.mirror)
         self.mirror_paths = []
+        self.health_calls = 0
         self.server = TestServer(app, host='127.0.0.1', handler_cancellation=True)
         await self.server.start_server()
         self.addAsyncCleanup(self.server.close)
@@ -269,7 +276,10 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         return web.Response(body=GUARD_BODY)
 
     async def health(self, request):
-        return web.Response(text='hello world', status=503 if self.mode in ('guard-down', 'engine-down') else 200)
+        self.health_calls += 1
+        # 'guard-dies': both guards load (one call each), then stop answering by handoff.
+        late = self.mode == 'guard-dies' and self.health_calls > 2
+        return web.Response(text='hello world', status=503 if late or self.mode in ('guard-down', 'engine-down') else 200)
 
     async def models(self, request):
         # The engine behind a private relay: no key, no models.
@@ -305,7 +315,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({'flag': False})
         return web.json_response({'flag': body['text'] == safety.CANARY, 'score': 0.123, 'model': 'mock@fixture'})
 
-    async def invoke(self, key=KEY+'\r\n', tty=False, args=(), **env):
+    async def invoke(self, key=KEY+'\r\n', tty=False, args=(), script='node-run.sh', **env):
         if tty:
             master, slave = pty.openpty()
             self.addCleanup(os.close, master)
@@ -313,7 +323,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
             stdin = slave
         else:
             stdin = asyncio.subprocess.PIPE
-        process = await asyncio.create_subprocess_exec(str(ROOT/'scripts/node-run.sh'), *args,
+        process = await asyncio.create_subprocess_exec(str(ROOT/'scripts'/script), *args,
                     cwd=ROOT, env={**self.env, **env}, stdin=stdin,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(process.communicate(None if tty else key.encode()), 10)
@@ -398,6 +408,86 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report['fingerprint']['guards'], dict.fromkeys(GUARD_REPOS, PIN))
         self.assertTrue(report['fingerprint']['engine_image'].startswith('sha256:'))
         self.assertRegex(report['fingerprint']['serving_config'], r'^[0-9a-f]{16}$')
+
+    async def test_boot_runs_no_tests_unless_asked(self):
+        code, output, report = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(report['mode'], 'steady')
+        self.assertEqual([r['name'] for r in report['gates']], list(node_run.STEADY_GATES))
+        self.assertEqual((self.calls, self.tunnel_calls), ([], []))
+        self.assertNotIn('guard_bench', report)
+        for extra in ({'args': ('--with-tests',)}, {'RUN_TESTS': '1'}):
+            with self.subTest(**{k: str(v) for k, v in extra.items()}):
+                # A fresh run each time: no live engine is left for boot.sh to resume.
+                (self.folder/'inspect.json').unlink()
+                code, output, report = await self.invoke(CALIBRATE='0', script='boot.sh', **extra)
+                self.assertEqual(code, 0, output)
+                self.assertEqual([r['name'] for r in report['gates']], list(node_run.GATES))
+                self.assertIn('guard_bench', report)
+                self.assertTrue(report['measurements']['loadtests'])
+
+    async def test_handoff_checks_every_guard_and_fails_closed(self):
+        self.mode = 'guard-dies'
+        code, output, report = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 1, output)
+        self.assertIn('PASS guards', output)
+        name = report['guards'][0]['name']
+        self.assertIn(f'FAIL handoff: {name} did not answer /health within 2 s; not serving', output)
+        self.assertNotIn('NODE READY', output)
+        self.assertEqual(report['state'], 'failed')
+        self.assertEqual(report['guard_health'], {name: {'http': 503, 'seconds': report['guard_health'][name]['seconds']}})
+        self.assertIn('ENGINE KEPT', output)
+
+    async def test_handoff_waits_for_both_guards_and_records_their_health(self):
+        code, output, report = await self.invoke(CALIBRATE='0')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(sorted(report['guard_health']), sorted(p['name'] for p in report['guards']))
+        self.assertTrue(all(row['http'] == 200 for row in report['guard_health'].values()))
+        # One load wait per guard, then one health check per guard at handoff.
+        self.assertEqual(self.health_calls, 4)
+
+    async def test_boot_rerun_resumes_a_live_engine_instead_of_starting_over(self):
+        code, output, first = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 0, output)
+        docker_before = len((self.folder/'docker.jsonl').read_text().splitlines())
+        code, output, report = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 0, output)
+        run_id = Path(first['report']).stem
+        self.assertIn(f'RESUMING {run_id}', output)
+        self.assertEqual(report['report'], first['report'])
+        self.assertEqual(report['state'], 'ready')
+        self.assertEqual([r['name'] for r in report['gates']][len(first['gates']):],
+                         ['preflight', 'key', 'resume', 'tunnel', 'guards', 'handoff', 'key-leak'])
+        # No second warm, no new or removed containers, same tunnel connector.
+        self.assertEqual(len((self.folder/'warm.jsonl').read_text().splitlines()), 1)
+        docker = [json.loads(line) for line in (self.folder/'docker.jsonl').read_text().splitlines()[docker_before:]]
+        self.assertFalse([args for args in docker if args[0] in ('run', 'rm', 'ps')])
+        self.assertTrue(report['tunnel']['reused'])
+        # And again: still one engine, still steady.
+        code, output, again = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(again['report'], first['report'])
+        self.assertEqual(len((self.folder/'warm.jsonl').read_text().splitlines()), 1)
+
+    async def test_boot_rerun_after_a_test_run_only_reverifies(self):
+        code, output, first = await self.invoke(CALIBRATE='0', script='boot.sh', args=('--with-tests',))
+        self.assertEqual(code, 0, output)
+        calls = len(self.calls)
+        code, output, report = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(report['mode'], 'steady')
+        self.assertEqual(len(self.calls), calls)
+
+    async def test_boot_starts_fresh_when_the_old_engine_is_gone(self):
+        code, output, first = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 0, output)
+        inspect = self.folder/'inspect.json'
+        inspect.write_text(json.dumps([{**json.loads(inspect.read_text())[0], 'State': {'Running': False}}]))
+        code, output, report = await self.invoke(CALIBRATE='0', script='boot.sh')
+        self.assertEqual(code, 0, output)
+        self.assertNotIn('RESUMING', output)
+        self.assertNotEqual(report['report'], first['report'])
+        self.assertEqual(len((self.folder/'warm.jsonl').read_text().splitlines()), 2)
 
     async def test_calibrate_flag_runs_the_full_suite(self):
         code, output, report = await self.invoke(CALIBRATE='0', args=('--calibrate',))
@@ -565,13 +655,12 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('--resume-at-64', launches[1]['args'])
         self.assertEqual([row['concurrency'] for row in report['measurements']['loadtests']], [128, 64])
 
-    async def test_private_unguarded_skips_guards_and_reaches_handoff(self):
-        code, output, report = await self.invoke(PRIVATE_UNGUARDED='1')
-        self.assertEqual(code, 0, output)
-        self.assertIn('SKIP guards', output)
-        self.assertIn('NODE READY', output)
-        self.assertEqual(report['guards'], 'skipped: PRIVATE_UNGUARDED=1')
-        self.assertFalse((self.folder/'state'/'guards').exists() if (self.folder/'state').exists() else False)
+    async def test_private_unguarded_is_refused_before_anything_starts(self):
+        code, output, report = await self.invoke(CALIBRATE='0', PRIVATE_UNGUARDED='1')
+        self.assertEqual(code, 1, output)
+        self.assertIn('FAIL preflight: PRIVATE_UNGUARDED is not supported: the guards always load', output)
+        self.assertFalse((self.folder/'warm.jsonl').exists())
+        self.assertNotIn('NODE READY', output)
 
     async def test_guard_rank_headroom_falls_back(self):
         code, output, report = await self.invoke(FAKE_HEADROOM='1')
@@ -803,7 +892,11 @@ class PureNodeTests(unittest.TestCase):
         self.assertEqual(plan(), (0, list(node_run.STEADY_GATES)))
         self.assertEqual(plan('--calibrate'), (0, list(node_run.GATES)))
         self.assertEqual(plan(CALIBRATE='1'), (0, list(node_run.GATES)))
+        self.assertEqual(plan('--with-tests'), (0, list(node_run.GATES)))
+        self.assertEqual(plan(RUN_TESTS='1'), (0, list(node_run.GATES)))
+        self.assertEqual(plan(RUN_TESTS='0'), (0, list(node_run.STEADY_GATES)))
         self.assertEqual(plan('--bench')[0], 2)
+        self.assertEqual(plan('--with-tests', '--calibrate')[0], 2)
 
     def test_key_reader_first_line_crlf_no_prompt(self):
         self.assertEqual(relay_config.read_classifier_key(io.StringIO(KEY+'\r\nignored\n')), KEY)
@@ -1059,6 +1152,7 @@ class PureNodeTests(unittest.TestCase):
 
                     obj.preflight = preflight
                     obj.guards_healthy, obj.relay_safety = AsyncMock(), AsyncMock()
+                    obj.check_guards = Mock()
                     obj.guard_bench = AsyncMock(return_value={})
                     output = io.StringIO()
                     with redirect_stdout(output), patch('sys.stdin', io.StringIO('' if mode == 'empty' else KEY+'\n')), \
@@ -1230,20 +1324,74 @@ class PureNodeTests(unittest.TestCase):
         self.assertEqual((node_run.percentile(values, 0.5), node_run.percentile(values, 0.99)), (50.0, 99.0))
         self.assertEqual(node_run.percentile([7.0], 0.99), 7.0)
 
-    def test_private_tunnel_probe_accepts_an_engine_401_on_models(self):
-        for status, expected in ((401, True), (404, False), (530, False)):
-            response = Mock(status=status)
-            request = AsyncMock()
-            request.__aenter__.return_value = response
-            session = Mock(get=Mock(return_value=request))
-            context = AsyncMock()
-            context.__aenter__.return_value = session
-            with patch('aiohttp.ClientSession', return_value=context), \
-                 patch('node_tunnel.time', Mock(monotonic=Mock(side_effect=itertools.chain([0], itertools.repeat(2))))), \
-                 patch('node_tunnel.asyncio.sleep', new=AsyncMock()):
-                self.assertEqual(asyncio.run(node_tunnel.reachable('https://example.invalid', 1, private=True)), expected)
-            self.assertEqual(session.get.call_args.args[0], 'https://example.invalid/v1/models')
-            self.assertNotIn('headers', session.get.call_args.kwargs)
+    def guard_checker(self, url):
+        obj = node_run.NodeRun.__new__(node_run.NodeRun)
+        obj.env = {'NODE_RUN_GUARD_HEALTH_URL': url}
+        obj.guard_plans = [{'name': 'g-shieldstral', 'port': 8600}, {'name': 'g-qwen', 'port': 8601}]
+        obj.record = {}
+        return obj
+
+    def test_guard_health_check_gives_each_guard_2_seconds(self):
+        import http.server
+        import threading
+
+        class Slow(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(2.6)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Slow)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        obj = self.guard_checker(f'http://127.0.0.1:{server.server_port}')
+        started = time.monotonic()
+        with self.assertRaisesRegex(node_run.GateFailure, 'g-shieldstral did not answer /health within 2 s'):
+            obj.check_guards()
+        self.assertLess(time.monotonic()-started, 2.5)
+        self.assertEqual(obj.record['guard_health']['g-shieldstral']['http'], None)
+
+    def test_guard_health_check_fails_closed_on_any_non_200(self):
+        for codes, failing in (((200, 503), 'g-qwen'), ((None, 200), 'g-shieldstral'), ((302, 200), 'g-shieldstral')):
+            with self.subTest(codes=codes):
+                obj = self.guard_checker('http://127.0.0.1:9')
+                with patch('node_run.http_status', side_effect=codes) as status, \
+                        self.assertRaisesRegex(node_run.GateFailure, failing+' did not answer'):
+                    obj.check_guards()
+                self.assertEqual(status.call_args.kwargs['timeout'], 2.0)
+        obj = self.guard_checker('http://127.0.0.1:9')
+        with patch('node_run.http_status', return_value=200):
+            obj.check_guards()
+        self.assertEqual(sorted(obj.record['guard_health']), ['g-qwen', 'g-shieldstral'])
+
+    def test_live_run_only_picks_the_newest_run_with_a_running_engine(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder, patch('node_run.ROOT', Path(folder)):
+            runs = Path(folder)/'runs'
+            runs.mkdir()
+            self.assertIsNone(node_run.live_run())
+            def write(stamp, container='b300-warm-x'):
+                record = {'warm_runs': [{'ready': {'container': container}}]} if container else {}
+                (runs/f'node-run-{stamp}.json').write_text(json.dumps(record))
+            write('20261103T100000.000000Z')
+            write('20261103T110000.000000Z')
+            running = Mock(returncode=0, stdout='true\n')
+            with patch('node_run.subprocess.run', return_value=running) as run:
+                self.assertEqual(node_run.live_run(), 'node-run-20261103T110000.000000Z')
+            self.assertEqual(run.call_args.args[0][:3], ['docker', 'inspect', 'b300-warm-x'])
+            with patch('node_run.subprocess.run', return_value=Mock(returncode=0, stdout='false\n')):
+                self.assertIsNone(node_run.live_run())
+            with patch('node_run.subprocess.run', return_value=Mock(returncode=1, stdout='')):
+                self.assertIsNone(node_run.live_run())
+            # The newest run never warmed, or names a container that is not ours: start fresh.
+            for container in (None, 'someone-else'):
+                write('20261103T120000.000000Z', container)
+                with patch('node_run.subprocess.run', return_value=running) as run:
+                    self.assertIsNone(node_run.live_run())
+                run.assert_not_called()
 
     def test_tunnel_probe_requires_relay_401_without_credentials(self):
         for status, payload, expected in ((401, {'error': 'unauthorized'}, True),

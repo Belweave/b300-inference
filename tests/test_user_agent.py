@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-import guard_weights, node_tunnel
+import guard_weights, node_tunnel, s3_mirror
 
 
 class Response:
@@ -34,6 +34,16 @@ class UserAgent(unittest.TestCase):
     def test_tool_download(self):
         request = self.sent(lambda t: node_tunnel.download('https://m/x', {}, t, 5, False))
         self.assertEqual(request.get_header('User-agent'), node_tunnel.USER_AGENT)
+
+    def test_s3_client(self):
+        # boto3 is a node dependency only; a stand-in records what the client is built with.
+        boto3, config = mock.Mock(), mock.Mock()
+        modules = {'boto3': boto3, 'botocore': mock.Mock(config=config), 'botocore.config': config}
+        env = {'AWS_ENDPOINT_URL': 'https://s3.example.invalid', 'AWS_ACCESS_KEY_ID': 'id', 'AWS_SECRET_ACCESS_KEY': 'secret'}
+        with mock.patch.dict(sys.modules, modules):
+            s3_mirror.client(env)
+        self.assertEqual(config.Config.call_args.kwargs['user_agent'], node_tunnel.USER_AGENT)
+        self.assertIs(boto3.client.call_args.kwargs['config'], config.Config.return_value)
 
 
 if __name__ == '__main__':

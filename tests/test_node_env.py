@@ -49,5 +49,32 @@ class MirrorEnvTests(unittest.TestCase):
         self.assertEqual(self.run_with().stdout, 'unset')
 
 
+class MirrorS3EnvTests(unittest.TestCase):
+    def test_home_mirror_s3_env_is_the_default_and_read_as_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            marker = home/'ran'
+            show = ('set -euo pipefail; source "$1"; '
+                    'printf "%s|%s" "${R2_BUCKET-unset}" "${MIRROR_S3_ENV_FILE-unset}"')
+            env = {'PATH': os.environ['PATH'], 'HOME': str(home), 'NODE_ENV_FILE': str(home/'none.env')}
+
+            def run():
+                return subprocess.run(['bash', '-c', show, 'bash', str(ROOT/'scripts/node-env.sh')],
+                                      env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(run().stdout, 'unset|unset')
+            creds = home/'mirror-s3.env'
+            creds.write_text('AWS_ACCESS_KEY_ID=fixture-id\nAWS_SECRET_ACCESS_KEY=fixture-secret\n'
+                             'AWS_ENDPOINT_URL=https://s3.example.invalid\nR2_BUCKET=fixture-bucket\n'
+                             f'touch {marker}\n')
+            creds.chmod(0o600)
+            proc = run()
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout, f'fixture-bucket|{creds}')
+            self.assertNotIn('fixture-secret', proc.stdout+proc.stderr)
+            self.assertFalse(marker.exists())
+            creds.chmod(0o644)
+            self.assertIn('MIRROR_S3_ENV_FILE must be owned by the current user with mode 600', run().stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
