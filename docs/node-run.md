@@ -201,6 +201,11 @@ The main model comes from the mirror first whenever `MIRROR_URL` and
 lacks or fails. Without a header it keeps the old order (Hugging Face, then the
 mirror). `MIRROR_ONLY=1` still never touches Hugging Face.
 
+`MIRROR_URL` is the model base, `<origin>/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8`,
+with no `dealignai/` org segment: shards are read from `<MIRROR_URL>/<revision>/<file>`
+and the mirror manifest from `<MIRROR_URL>/<revision>/manifest.json`. The guards keep
+the org: `<origin>/models/<org>/<name>/<revision>/`.
+
 ### mirror.env
 
 The mirror bearer lives in one line, either `Bearer <token>` or

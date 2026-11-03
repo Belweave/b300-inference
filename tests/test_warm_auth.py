@@ -177,6 +177,30 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(('mirror' if mirror_good else 'hf')+' x.safetensors 4 bytes', text)
             self.assertNotIn(VALUE, text)
 
+    async def test_main_model_mirror_keys_have_no_org_segment(self):
+        # MIRROR_URL is the model base, <origin>/models/<name> with no HF org, as staged
+        # in R2; guards use <origin>/models/<org>/<name>/<rev>/ (test_guard_weights).
+        real = json.loads((Path(__file__).resolve().parents[1]/'config/manifests/uncensored-c19ca5c.json').read_text())
+        revision = real['revision']
+        self.assertEqual(real['repo'], 'dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8')
+        data = {'model': {'repo': real['repo'], 'revision': revision},
+                'files': {'model-00001-of-00002.safetensors': FILE}, 'differs_from_base': ['model-00001-of-00002.safetensors']}
+        calls = []
+        class Session:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            def get(self, url, **options):
+                calls.append(url)
+                if url.endswith('manifest.json'): return Response(obj={'revision': revision, 'files': data['files']})
+                return Response(body=b'good')
+        base = 'https://mirror.invalid/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8'
+        env = {'MIRROR_URL': base+'/', 'MIRROR_AUTH_HEADER': HEADER}
+        with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
+            rows = await warm_download.acquire(data, Path(folder)/'target', Path(folder)/'base', time.time()+30, env)
+        self.assertEqual(calls, [f'{base}/{revision}/manifest.json', f'{base}/{revision}/model-00001-of-00002.safetensors'])
+        self.assertTrue(all('dealignai' not in url for url in calls))
+        self.assertEqual([r['source'] for r in rows], ['mirror'])
+
     async def test_mirror_errors_drop_raw_exception_context_and_headers(self):
         http_error = warm_download.aiohttp.ClientResponseError(
             SimpleNamespace(real_url='https://mirror.invalid', headers={'X-Mirror-Access':VALUE}),
