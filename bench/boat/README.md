@@ -197,7 +197,7 @@ python3 scripts/pull_mirror.py --target "$WEIGHTS_DIR" --timeout-seconds 3600
 Both guards are mirrored at their pinned revisions under
 `$MIRROR_ORIGIN/models/<repo>/<revision>/<file>`, with a `manifest.json` beside
 them in the same style as the main model. node-run's preflight pulls them from
-there first and falls back to Hugging Face; see `docs/node-run.md`.
+there only; `MIRROR_ONLY=0` is a debug flag that allows Hugging Face. See `docs/node-run.md`.
 
 The already-staged node amd64 tool URL is
 `$MIRROR_ORIGIN/tools/cloudflared/2026.10.7/cloudflared-linux-amd64`,

@@ -101,7 +101,7 @@ class GuardWeightsTests(unittest.TestCase):
             self.assertEqual(headers['Authorization'], HEADER.split(': ', 1)[1])
 
     def test_mirror_checksum_mismatch_falls_back_to_hf(self):
-        self.mirror.mode = 'corrupt'
+        self.mirror.mode, self.env['MIRROR_ONLY'] = 'corrupt', '0'
         result = self.stage()
         self.assert_staged(result)
         self.assertEqual(result['sources'], {'hf': 2})
@@ -109,6 +109,7 @@ class GuardWeightsTests(unittest.TestCase):
         self.assert_no_credential_to_hf()
 
     def test_mirror_401_or_redirect_falls_back_without_following(self):
+        self.env['MIRROR_ONLY'] = '0'
         for mode in ('401', 'redirect'):
             with self.subTest(mode=mode):
                 self.mirror.mode, self.mirror.requests, self.hf.requests = mode, [], []
@@ -119,6 +120,16 @@ class GuardWeightsTests(unittest.TestCase):
                 # A followed redirect would show up as a request for /elsewhere.
                 self.assertFalse(any('elsewhere' in p for p, _ in self.mirror.requests+self.hf.requests))
                 self.assert_no_credential_to_hf()
+
+    def test_mirror_only_is_the_default_and_never_asks_hf(self):
+        self.mirror.mode = 'corrupt'
+        with self.assertRaises(ValueError):
+            self.stage()
+        self.assertEqual(self.hf.requests, [])
+        del self.env['MIRROR_URL']
+        with self.assertRaisesRegex(ValueError, 'no mirror source'):
+            self.stage()
+        self.assertEqual(self.hf.requests, [])
 
     def test_both_bad_fails_closed_without_url_or_header(self):
         self.mirror.mode, self.hf.mode = 'corrupt', '401'
@@ -172,6 +183,7 @@ class GuardWeightsTests(unittest.TestCase):
 
     def test_no_mirror_uses_hf_and_unpinned_revision_is_refused(self):
         del self.env['MIRROR_URL']
+        self.env['MIRROR_ONLY'] = '0'
         self.assertEqual(self.stage()['sources'], {'hf': 2})
         with self.assertRaises(ValueError):
             guard_weights.stage(self.env, REPO, 'c'*40, self.root)

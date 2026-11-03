@@ -120,11 +120,13 @@ directory, guard configuration, measurements and final decision.
      `GUARD_WEIGHTS_DIR/<repo>/<revision>/`. Every file is checked against
      `config/manifests/guards.json` (size and SHA256 for the pinned revision).
      A verified local copy is reused, so a rerun downloads nothing. Otherwise
-     files download in parallel (`GUARD_WORKERS`, default 4) and each comes from `$MIRROR_ORIGIN/models/<repo>/<revision>/` with
-     `MIRROR_AUTH_HEADER` and no redirects, then from Hugging Face at the same
-     revision with no header. The mirror origin is `MIRROR_URL`'s scheme and
-     host. `MIRROR_ONLY` covers the main model only, so a mirror outage cannot
-     block the guards. If neither source verifies, preflight fails before warm.
+     files download in parallel (`GUARD_WORKERS`, default 4) from the R2 mirror
+     only, over S3, or from `$MIRROR_ORIGIN/models/<repo>/<revision>/` with
+     `MIRROR_AUTH_HEADER` and no redirects when `MIRROR_HTTP=1`. The mirror
+     origin is `MIRROR_URL`'s scheme and host. `MIRROR_ONLY=1` is the default
+     for the guards too; `MIRROR_ONLY=0` is a debug flag that adds Hugging Face
+     at the same revision as a last source. If no source verifies, preflight
+     fails before warm.
      Each finished file is logged to `runs/node-run-<id>/guards.log`.
 2. **warm-timeout:** use `WARM_TIMEOUT_SECONDS=3600` unless explicitly configured;
    cap it by the remaining absolute deadline, including warm's earlier bound.
@@ -246,7 +248,7 @@ fetched from Hugging Face. `MIRROR_ONLY=0` is a debug flag that allows a loud
 
 The Cloudflare Worker HTTP mirror (`MIRROR_URL` + `MIRROR_AUTH_HEADER`) is **off by
 default** for weights. Only `MIRROR_HTTP=1` turns it back on, after S3 and before
-Hugging Face for the main model, and before Hugging Face for the guards.
+Hugging Face (only with `MIRROR_ONLY=0`) for the main model and the guards.
 
 `MIRROR_URL` is the model base, `<origin>/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8`,
 with no `dealignai/` org segment: shards are read from `<MIRROR_URL>/<revision>/<file>`

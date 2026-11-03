@@ -111,8 +111,8 @@ def fetch(url, headers, redirects, target, f, timeout):
 def stage(env, repo, revision, root, timeout=60, log=None):
     """Leave every pinned file verified under root/<repo>/<revision>, or raise.
 
-    Files download in parallel (GUARD_WORKERS, default 4), each trying the mirror
-    and then HF. Returns the dir plus how many files came from each source and which
+    Files download in parallel (GUARD_WORKERS, default 4), each from the mirror only.
+    MIRROR_ONLY=0 is a debug flag that adds HF as a last source. Returns the dir plus how many files came from each source and which
     sources failed. Errors name only the guard, file and source, never a URL or header."""
     files = pinned_files(env, repo, revision)
     workers = int(env.get('GUARD_WORKERS', '4'))
@@ -130,8 +130,12 @@ def stage(env, repo, revision, root, timeout=60, log=None):
         auth = parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
         if auth:
             sources.append(('mirror', f'{origin}/models/{repo}/{revision}/', auth.headers(), False))
-    # Same pinned revision, no credential, and HF redirects to its CDN.
-    sources.append(('hf', f"{testing_value(env, 'GUARD_HF_URL', HF_URL)}/{repo}/resolve/{revision}/", {}, True))
+    mirror_only = env.get('MIRROR_ONLY', '1')
+    if mirror_only not in ('0', '1'):
+        raise ValueError('MIRROR_ONLY must be 0 or 1')
+    if mirror_only == '0':
+        # Debug only. Same pinned revision, no credential, and HF redirects to its CDN.
+        sources.append(('hf', f"{testing_value(env, 'GUARD_HF_URL', HF_URL)}/{repo}/resolve/{revision}/", {}, True))
     failed, lock = [], threading.Lock()
 
     def note(line):
@@ -147,6 +151,8 @@ def stage(env, repo, revision, root, timeout=60, log=None):
         target.unlink(missing_ok=True)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name+'.part')
+        if not sources:
+            failed.append(f"{f['filename']}: no mirror source (MIRROR_ONLY needs S3 or MIRROR_HTTP=1)")
         for name, base, headers, redirects in sources:
             try:
                 if name == 's3':
@@ -157,7 +163,7 @@ def stage(env, repo, revision, root, timeout=60, log=None):
             except s3_mirror.S3MirrorError:
                 ok = False
                 failed.append(f"s3: {f['filename']} download failed")
-                note(f"S3 FAILED {f['filename']}, FALLING BACK")
+                note(f"S3 FAILED {f['filename']}")
             except Exception as exc:
                 # An HTTP error holds its response open; close it, but report nothing from it.
                 if hasattr(exc, 'close'):
