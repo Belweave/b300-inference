@@ -12,6 +12,7 @@ try:
     import aiohttp
     from aiohttp import web
     import sse_relay
+    import yarl
 except ImportError:  # pragma: no cover - node image always has aiohttp
     aiohttp = None
 
@@ -71,6 +72,12 @@ def fake_engine(seen, cancelled, reply='hi', deltas=None):
     engine.router.add_post('/v1/chat/completions', chat)
     engine.router.add_post('/v1/completions', chat)
     engine.router.add_get('/health', health)
+    engine.router.add_get('/metrics', health)
+
+    async def admin(request):
+        seen.append(('admin', request.raw_path))
+        return web.Response(text='admin')
+    engine.router.add_route('*', '/{tail:.*}', admin)
     return engine
 
 
@@ -136,6 +143,19 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b'keepalive', data)
         async with self.client.get(self.url+'/health') as r:
             self.assertEqual((r.status, await r.text()), (200, 'ok'))
+
+    async def test_admin_and_encoded_paths_never_reach_the_engine(self):
+        for method, path in (('GET', '/get_server_info'), ('GET', '/v1/..%2fget_server_info'),
+                             ('GET', '/v1/..%2Fget_server_info'), ('POST', '/weights_checker'),
+                             ('POST', '/v1/%2e%2e/update_weights_from_disk'), ('GET', '//v1/models'),
+                             ('POST', '/release_memory_occupation'), ('GET', '/v1/chat/completions'),
+                             ('POST', '/generate'), ('GET', '/metrics')):
+            url = yarl.URL(self.url+path, encoded=True)
+            async with self.client.request(method, url, headers={'Cf-Connecting-Ip': '192.0.2.1'}) as r:
+                self.assertEqual(r.status, 404, path)
+        self.assertFalse([hit for hit in self.seen if hit[0] == 'admin'])
+        async with self.client.get(self.url+'/metrics') as r:
+            self.assertEqual(r.status, 200)
 
     async def test_engine_down_is_502_for_the_gateway_no_node_path(self):
         await self.engine.cleanup()

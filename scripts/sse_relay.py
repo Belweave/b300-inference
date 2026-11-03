@@ -10,12 +10,14 @@ this relay guarantees bytes on the wire:
   * engine bytes pass through unbuffered; there is no total-duration timeout;
   * a client disconnect closes the engine connection, which aborts the engine request;
   * an engine error after synthesized headers becomes one `data: {"error": ...}` event.
-Everything else (health, models, metrics, non-streaming completions) passes through
-unchanged. A non-streaming request whose engine takes >100 s to first byte can still
+Only the inference routes in PUBLIC pass through, matched on the raw path so
+encoded tricks like /v1/..%2fget_server_info never reach the engine. /metrics is
+served to local callers only. SGLang's admin routes are not reachable here.
+Health, models, metrics and non-streaming completions pass through unchanged. A non-streaming request whose engine takes >100 s to first byte can still
 hit 524 at Cloudflare; clients should use stream=true for long work.
 Authorization passes through unchanged; raw keys are never logged or stored.
 With SAFETY=1, /v1/safety/csam scores text in-process via the classifier adapter.
-The gateway owns enforcement and evidence. Other paths still pass through.
+The gateway owns enforcement and evidence.
 """
 import asyncio
 import hmac
@@ -40,6 +42,19 @@ def wants_stream(method, content_type, body):
     except ValueError:
         return False
     return isinstance(data, dict) and data.get('stream') is True
+
+
+PUBLIC = {('GET', '/health'), ('GET', '/v1/models'),
+          ('POST', '/v1/chat/completions'), ('POST', '/v1/completions')}
+LOCAL = {('GET', '/metrics')}
+
+
+def allowed(request):
+    route = (request.method, request.rel_url.raw_path)
+    if route in PUBLIC:
+        return True
+    # cloudflared stamps Cf-Connecting-Ip on every tunnel request.
+    return route in LOCAL and 'Cf-Connecting-Ip' not in request.headers
 
 
 def forward_headers(headers):
@@ -81,11 +96,13 @@ class Relay:
         headers = forward_headers(request.headers)
         if stream:
             headers['Accept-Encoding'] = 'identity'  # compressed SSE would hide event boundaries
-        return self.session.request(request.method, self.upstream + request.rel_url.path_qs, headers=headers,
+        return self.session.request(request.method, self.upstream + request.rel_url.raw_path_qs, headers=headers,
                                     data=body or None, allow_redirects=False,
                                     skip_auto_headers=('User-Agent', 'Accept-Encoding', 'Content-Type'))
 
     async def handle(self, request):
+        if not allowed(request):
+            return web.json_response({'error': 'not found'}, status=404)
         body = await request.read()
         stream = wants_stream(request.method, request.headers.get('Content-Type'), body)
         if not stream:

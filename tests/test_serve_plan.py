@@ -330,6 +330,43 @@ class LifecycleTests(unittest.TestCase):
                 self.assertNotIn('SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE',call.kwargs['env'])
                 self.assertNotIn('INFER_UPSTREAM_KEY',call.kwargs['env'])
 
+    def test_admin_routes_get_their_own_unshared_key(self):
+        p = plan(LAYOUT='dep4x2')
+        for process in p['processes']:
+            args = serve_group.child_command(process,'fixture-key','fixture-admin')
+            if process['role'] == 'engine':
+                self.assertEqual(args[args.index('--admin-api-key')+1],'fixture-admin')
+            else:
+                self.assertNotIn('--admin-api-key',args)
+            self.assertEqual(args[-2:],['--api-key','fixture-key'])
+
+    def crashing_engine(self):
+        engine = Mock()
+        engine.poll.side_effect = [None, None, 1, 1, 1]
+        return engine
+
+    def serve(self, ever_healthy):
+        payload = dict(plan=plan(),env=dict(selected(),INFER_UPSTREAM_KEY='fixture'))
+        engines = [self.crashing_engine() for _ in range(serve_group.MAX_RESTARTS+2)]
+        with patch('serve_group.subprocess.Popen',side_effect=engines) as popen, \
+             patch('serve_group.healthy',return_value=ever_healthy), \
+             patch('serve_group.time.sleep'), patch('serve_group.signal.signal'), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as log:
+            with self.assertRaisesRegex(RuntimeError,'process exited'): serve_group.run(payload)
+        return popen, log.getvalue()
+
+    def test_crash_after_serving_restarts_a_bounded_number_of_times(self):
+        popen, log = self.serve(True)
+        self.assertEqual(popen.call_count, serve_group.MAX_RESTARTS+1)
+        self.assertIn('giving up', log)
+        admin_keys = {c.args[0][c.args[0].index('--admin-api-key')+1] for c in popen.call_args_list}
+        self.assertEqual(len(admin_keys), 1)
+
+    def test_crash_before_serving_is_not_retried(self):
+        popen, log = self.serve(False)
+        self.assertEqual(popen.call_count, 1)
+        self.assertNotIn('restarting', log)
+
     def test_supervisor_rechecks_host_ram_before_launch(self):
         payload = dict(plan=plan(ENGRAM='host'),env=dict(selected(ENGRAM='host'),INFER_UPSTREAM_KEY='fixture'))
         with patch('serve_group.Path.read_text',return_value='MemAvailable: 1 kB\n'), patch('serve_group.subprocess.Popen') as popen:
@@ -387,7 +424,7 @@ class LifecycleTests(unittest.TestCase):
 
             def command(argv):
                 if argv[-1] == '--help':
-                    return ' '.join(a for p in expected['processes'] for a in p['argv_without_key'])+' --api-key'
+                    return ' '.join(a for p in expected['processes'] for a in p['argv_without_key'])+' --api-key --admin-api-key'
                 if '-c' in argv:
                     code = argv[argv.index('-c')+1]
                     if 'importlib.metadata' in code: return '{"version":"fixture"}'
@@ -432,7 +469,7 @@ class LifecycleTests(unittest.TestCase):
 
             def command(argv):
                 if argv[-1] == '--help':
-                    return ' '.join(a for p in expected['processes'] for a in p['argv_without_key'])+' --api-key'
+                    return ' '.join(a for p in expected['processes'] for a in p['argv_without_key'])+' --api-key --admin-api-key'
                 if '-c' in argv:
                     code = argv[argv.index('-c')+1]
                     if 'importlib.metadata' in code: return '{"version":"fixture"}'

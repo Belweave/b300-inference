@@ -259,6 +259,17 @@ registered connection again. The fit fallback to 64 can still relaunch through
 warm.sh. If that relaunch fails, warm removes the engine and there is nothing
 to resume.
 
+## Engine crash after serving
+
+`scripts/serve_group.py` runs inside the engine container and watches every
+serve process. Once the whole plan has answered `GET /health`, a crash no longer
+ends the night: it logs the exit codes to `engine.log`, stops the rest of the
+plan, waits 15 seconds and starts it again in the same container, up to 3 times.
+Each restart reloads weights from the local disk, about 10 minutes on a B300.
+The gateway answers 503 meanwhile. A crash before the first healthy answer still
+stops the container, so a bad image or flag fails warm-up instead of looping.
+Guards, the tunnel and the relay are separate and keep running.
+
 ## Cleanup
 
 A fresh run (not a resume) starts clean. After taking the run lock, preflight

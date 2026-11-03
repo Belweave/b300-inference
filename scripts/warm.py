@@ -240,6 +240,7 @@ class Warm:
             help_text = engine_help if process['role'] == 'engine' else self.command([
                 'docker','run','--rm','--network','none','--entrypoint','python3',image, '-m', args[2], '--help'])
             required = {a for a in args if a.startswith('--')} | {'--api-key'}
+            if process['role'] == 'engine': required.add('--admin-api-key')
             missing = sorted(required-set(re.findall(r'--[a-z0-9-]+',help_text)))
             if missing: raise ValueError('Image lacks required flags: '+','.join(missing))
             if process['role'] == 'engine':

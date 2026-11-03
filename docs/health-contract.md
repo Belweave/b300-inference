@@ -44,3 +44,26 @@ rename; see [the naming contract](model-naming.md). Netops owns gateway changes.
 The live key is `INFER_UPSTREAM_KEY` from `~/node.env` and remains visible in container/process
 inspection. The kit's Python redactor and Docker's `--log-driver none` protect logs only;
 see [the auth contract](auth-contract.md).
+
+## Admin routes
+
+SGLang marks its admin routes (`/update_weights_from_disk`, `/weights_checker`,
+`/load_lora_adapter`, `/start_profile`, `/flush_cache`, `/abort_request` and others)
+`ADMIN_OPTIONAL`. With only `--api-key` set, that key unlocks them too, and the
+gateway sends every client request upstream with that key. On 2026-11-03 an
+outside tester with a customer key reached these through the gateway with an
+encoded path (`/v1/..%2f<route>`). Their `/weights_checker` call ran a weight
+checksum during a live decode, hit a CUDA illegal memory access, and took the
+engine down.
+`serve_group.py` now also passes `--admin-api-key` with a random value made
+inside the container per launch and never stored, so those routes answer 401
+for everyone. The kit itself uses only `/health`, `/metrics`, `/v1/models` and
+the completion routes. Warm-up requires the flag in the image's `--help`.
+
+The engine binds 127.0.0.1 only, and the tunnel reaches it through the relay on
+:8000. The relay now forwards just `GET /health`, `GET /v1/models`,
+`POST /v1/chat/completions` and `POST /v1/completions`, compared on the raw,
+undecoded path, so `/v1/..%2fget_server_info` and similar tricks get 404 without
+touching the engine. `GET /metrics` is answered only for local callers (no
+`Cf-Connecting-Ip` header). `SSE_RELAY=0` bypasses all of this and must not be
+used behind the tunnel.

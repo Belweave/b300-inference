@@ -1010,7 +1010,7 @@ def main(argv=None):
             print('Plan: pinned TP8 warm; tunnel; load both guards from verified weights; no benchmark, canary, load test or fit.')
         print('Plan: preflight cleans stale containers and our relay, stages a verified cloudflared; tunnel is a hard gate before handoff.')
         print('Plan: a late failure keeps the engine up and prints RESUME=<run id> to rerun only the late gates.')
-        print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; no automatic restarts.')
+        print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; after serving, the engine restarts itself up to 3 times on a crash.')
         return 0
     os.umask(0o077)
     try:
