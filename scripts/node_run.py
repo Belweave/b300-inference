@@ -314,6 +314,13 @@ class NodeRun:
             importlib.import_module('aiohttp')
         except ImportError:
             raise GateFailure('python dependency aiohttp is required') from None
+        # Weights come straight from R2 over S3 when MIRROR_S3_ENV_FILE loaded creds.
+        import s3_mirror
+        if s3_mirror.enabled(self.env):
+            try:
+                importlib.import_module('boto3')
+            except ImportError:
+                raise GateFailure('python dependency boto3 is required for S3 weights (pip install -r requirements-node.txt)') from None
         self.command(['docker', 'info'])
         self.engine_port = engine_port
         _, output = self.command(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'])

@@ -36,3 +36,28 @@ if [[ ${DRY_RUN:-0} != 1 && -n ${MIRROR_ENV_FILE:-} ]]; then
     esac
     unset mirror_line
 fi
+# Read-only R2 S3 creds for the model-mirror bucket (KEY=VALUE lines). Parsed as data,
+# never sourced or echoed; only the names below are exported.
+# shellcheck disable=SC2088
+if [[ ${MIRROR_S3_ENV_FILE:-} == '~/'* ]]; then MIRROR_S3_ENV_FILE="$HOME/${MIRROR_S3_ENV_FILE:2}"; fi
+if [[ ${DRY_RUN:-0} != 1 && -n ${MIRROR_S3_ENV_FILE:-} ]]; then
+    owner_only "$MIRROR_S3_ENV_FILE" MIRROR_S3_ENV_FILE
+    while IFS= read -r s3_line || [[ -n $s3_line ]]; do
+        s3_line=${s3_line%$'\r'}
+        s3_line=${s3_line#export }
+        s3_name=${s3_line%%=*}
+        s3_value=${s3_line#*=}
+        s3_value=${s3_value#\"}; s3_value=${s3_value%\"}
+        s3_value=${s3_value#\'}; s3_value=${s3_value%\'}
+        case $s3_name in
+            AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_ENDPOINT_URL|AWS_REGION|AWS_DEFAULT_REGION|R2_BUCKET|R2_ENDPOINT)
+                export "$s3_name=$s3_value" ;;
+        esac
+    done < "$MIRROR_S3_ENV_FILE"
+    unset s3_line s3_name s3_value
+    if [[ -z ${AWS_ENDPOINT_URL:-} && -n ${R2_ENDPOINT:-} ]]; then export AWS_ENDPOINT_URL=$R2_ENDPOINT; fi
+    for s3_name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_ENDPOINT_URL R2_BUCKET; do
+        if [[ -z ${!s3_name:-} ]]; then echo "MIRROR_S3_ENV_FILE must set $s3_name" >&2; unset s3_name; return 1; fi
+    done
+    unset s3_name
+fi

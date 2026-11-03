@@ -176,7 +176,7 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         mirror={'revision':'a'*40,'files':{'x.safetensors':f}}
         with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession',return_value=Session()):
             root=Path(folder)/'target'
-            rows=await download.acquire(data,root,Path(folder)/'base',time.time()+30,{'MIRROR_URL':'https://mirror.invalid'})
+            rows=await download.acquire(data,root,Path(folder)/'base',time.time()+30,{'MIRROR_HTTP':'1','MIRROR_URL':'https://mirror.invalid'})
             self.assertEqual(rows[0]['source'],'mirror')
             self.assertEqual((root/'x.safetensors').read_bytes(),b'good')
             self.assertEqual(len(calls),3)

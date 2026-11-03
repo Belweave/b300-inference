@@ -74,7 +74,7 @@ class GuardWeightsTests(unittest.TestCase):
         self.addCleanup(self.mirror.close)
         self.addCleanup(self.hf.close)
         self.env = {'NODE_RUN_TESTING': '1', 'GUARD_MANIFEST': str(manifest), 'GUARD_HF_URL': self.hf.url,
-                    'MIRROR_URL': self.mirror.url+'/models/main-model', 'MIRROR_AUTH_HEADER': HEADER}
+                    'MIRROR_HTTP': '1', 'MIRROR_URL': self.mirror.url+'/models/main-model', 'MIRROR_AUTH_HEADER': HEADER}
         self.root = self.folder/'guards'
 
     def stage(self):

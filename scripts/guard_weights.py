@@ -15,6 +15,7 @@ import urllib.request
 from urllib.parse import quote
 
 from mirror_auth import parse_mirror_auth
+import s3_mirror
 # One mirror origin rule and one no-redirect handler, shared with the cloudflared fetch.
 from node_tunnel import USER_AGENT, NoRedirect, mirror_base, testing_value
 
@@ -120,7 +121,11 @@ def stage(env, repo, revision, root, timeout=60, log=None):
     dest = (Path(root)/repo/revision).absolute()
     dest.mkdir(parents=True, exist_ok=True)
     sources = []
-    origin = mirror_base(env)
+    s3 = s3_mirror.client(env) if s3_mirror.enabled(env) else None
+    if s3 is not None:
+        sources.append(('s3', None, {}, False))
+    # The Worker HTTP mirror is opt-in (MIRROR_HTTP=1); S3 direct is the default.
+    origin = mirror_base(env) if env.get('MIRROR_HTTP', '0') == '1' else None
     if origin:
         auth = parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
         if auth:
@@ -144,7 +149,15 @@ def stage(env, repo, revision, root, timeout=60, log=None):
         tmp = target.with_name(target.name+'.part')
         for name, base, headers, redirects in sources:
             try:
-                ok = fetch(base+quote(f['filename']), headers, redirects, tmp, f, timeout)
+                if name == 's3':
+                    s3_mirror.download(s3, env, s3_mirror.guard_key(repo, revision, f['filename']), tmp, f)
+                    ok = True
+                else:
+                    ok = fetch(base+quote(f['filename']), headers, redirects, tmp, f, timeout)
+            except s3_mirror.S3MirrorError:
+                ok = False
+                failed.append(f"s3: {f['filename']} download failed")
+                note(f"S3 FAILED {f['filename']}, FALLING BACK")
             except Exception as exc:
                 # An HTTP error holds its response open; close it, but report nothing from it.
                 if hasattr(exc, 'close'):

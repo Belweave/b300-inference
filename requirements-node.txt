@@ -1,3 +1,4 @@
 # Install in the node image before a rental; engines have their own dependencies.
 huggingface_hub[hf_xet]>=1.0,<3
 aiohttp>=3.12,<4
+boto3>=1.34,<2

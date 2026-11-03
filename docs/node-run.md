@@ -196,10 +196,24 @@ There is no `rclone-prestage.log` in this flow. `runs/<id>/weights.log` from
 `bootstrap.sh` is a different, older path. The model download reports per file,
 so it is quiet while big shards stream; `status.sh` shows the bytes moving.
 
-The main model comes from the mirror first whenever `MIRROR_URL` and
-`MIRROR_AUTH_HEADER` are both set, with Hugging Face only for files the mirror
-lacks or fails. Without a header it keeps the old order (Hugging Face, then the
-mirror). `MIRROR_ONLY=1` still never touches Hugging Face.
+**Weights come straight from R2 over S3 by default.** Set `MIRROR_S3_ENV_FILE`
+(for example `~/mirror-s3.env`, mode 600, owned by you) in `~/node.env`. `node-env.sh`
+reads it as `KEY=VALUE` data, never sources it, and exports only
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL` (or `R2_ENDPOINT`),
+`AWS_REGION`/`AWS_DEFAULT_REGION` and `R2_BUCKET`. With those set, every main model
+file comes from `s3://$R2_BUCKET/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/<revision>/<file>`
+(no `dealignai/` segment) and every guard file from
+`s3://$R2_BUCKET/models/<org>/<name>/<revision>/<file>`, using parallel ranged GETs
+(boto3, 64 MB parts, `S3_CONCURRENCY` per file, default 16; `SHARD_WORKERS` files at
+once). Each file is checked for size and SHA256 against the pinned manifest before it is
+renamed into place, and verified markers make reruns skip it. If S3 fails for a file,
+`weights.log` / `guards.log` get a loud `S3 FAILED ... FALLING BACK TO HF` line and that
+file comes from Hugging Face at the same revision. `MIRROR_ONLY=1` turns that fallback
+off. `MIRROR_S3=0` disables S3. Preflight requires `boto3` when S3 is on.
+
+The Cloudflare Worker HTTP mirror (`MIRROR_URL` + `MIRROR_AUTH_HEADER`) is **off by
+default** for weights. Only `MIRROR_HTTP=1` turns it back on, after S3 and before
+Hugging Face for the main model, and before Hugging Face for the guards.
 
 `MIRROR_URL` is the model base, `<origin>/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8`,
 with no `dealignai/` org segment: shards are read from `<MIRROR_URL>/<revision>/<file>`

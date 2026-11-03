@@ -246,7 +246,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
                     'NODE_RUN_ENGINE_HEALTH_URL': self.url, **cloudflared_env(self.folder),
                     'NODE_RUN_GUARD_HEALTH_URL': self.url, 'FAKE_STATE': str(self.folder),
                     'WEIGHTS_DIR': str(self.folder/'weights'), **guard_fixture(self.folder, staged=False),
-                    'MIRROR_URL': self.url+'/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
+                    'MIRROR_HTTP': '1', 'MIRROR_URL': self.url+'/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
                     'DISK_SPACE_ACTION': 'warn', 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'upstream-fixture',
                     'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN,
                     'LOADTEST_DURATION_SECONDS': '0.12', 'GUARD_TIMEOUT_SECONDS': '1',
@@ -995,7 +995,7 @@ class PureNodeTests(unittest.TestCase):
                        'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1', 'FAKE_STATE': folder,
                        'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch, staged=False),
                        **cloudflared_env(scratch),
-                       'MIRROR_URL': 'http://127.0.0.1:9/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
+                       'MIRROR_HTTP': '1', 'MIRROR_URL': 'http://127.0.0.1:9/models/main-model', 'MIRROR_AUTH_HEADER': MIRROR_HEADER,
                        'DISK_SPACE_ACTION': action, 'TUNNEL_SLOT': 'a', 'INFER_UPSTREAM_KEY': 'fixture',
                        'SAFETY_MODEL_REVISION': PIN, 'SAFETY_QWEN_REVISION': PIN}
                 with patch.dict(os.environ, env, clear=True):

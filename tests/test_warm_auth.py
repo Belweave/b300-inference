@@ -111,7 +111,7 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                     return Response(body=b'bad!' if broken else b'good')
             with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
                 task = warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base',
-                                             time.time()+30, {'MIRROR_URL':'https://mirror.invalid','MIRROR_ONLY':'1'})
+                                             time.time()+30, {'MIRROR_HTTP':'1','MIRROR_URL':'https://mirror.invalid','MIRROR_ONLY':'1'})
                 if broken:
                     with self.assertRaises(mirror_auth.MirrorRequestError): await task
                 else:
@@ -135,7 +135,7 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                     calls.append((url, options))
                     if url.endswith('manifest.json'): return Response(obj=MIRROR)
                     return Response(body=b'bad!' if 'huggingface.co' in url else b'good')
-            env = {'MIRROR_URL':'https://mirror.invalid'}
+            env = {'MIRROR_HTTP':'1','MIRROR_URL':'https://mirror.invalid'}
             if header is not None: env['MIRROR_AUTH_HEADER'] = header
             with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
                 rows = await warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base', time.time()+30, env)
@@ -163,7 +163,7 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                     if url.endswith('manifest.json'): return Response(obj=MIRROR)
                     if 'huggingface.co' in url: return Response(body=b'good')
                     return Response(body=b'good' if mirror_good else b'bad!')
-            env = {'MIRROR_URL': 'https://mirror.invalid', 'MIRROR_AUTH_HEADER': HEADER, 'MIN_MBPS': '1e9'}
+            env = {'MIRROR_HTTP': '1', 'MIRROR_URL': 'https://mirror.invalid', 'MIRROR_AUTH_HEADER': HEADER, 'MIN_MBPS': '1e9'}
             with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
                 log = Path(folder)/'weights.log'
                 rows = await warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base',
@@ -194,7 +194,7 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                 if url.endswith('manifest.json'): return Response(obj={'revision': revision, 'files': data['files']})
                 return Response(body=b'good')
         base = 'https://mirror.invalid/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8'
-        env = {'MIRROR_URL': base+'/', 'MIRROR_AUTH_HEADER': HEADER}
+        env = {'MIRROR_HTTP': '1', 'MIRROR_URL': base+'/', 'MIRROR_AUTH_HEADER': HEADER}
         with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
             rows = await warm_download.acquire(data, Path(folder)/'target', Path(folder)/'base', time.time()+30, env)
         self.assertEqual(calls, [f'{base}/{revision}/manifest.json', f'{base}/{revision}/model-00001-of-00002.safetensors'])

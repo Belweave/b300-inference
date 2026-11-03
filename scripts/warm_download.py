@@ -12,6 +12,7 @@ from urllib.parse import quote
 import aiohttp
 from warm_logic import verify_mirror, fallback
 from mirror_auth import MirrorRequestError, parse_mirror_auth, mirror_request
+import s3_mirror
 
 MANIFEST = Path(__file__).resolve().parents[1]/'config/manifests/uncensored-c19ca5c.json'
 
@@ -137,8 +138,16 @@ async def acquire(data, root, base, end, env, log=None):
     if mirror_only not in ('0', '1'):
         raise ValueError('MIRROR_ONLY must be 0 or 1')
     mirror_only = mirror_only == '1'
-    if mirror_only and not env.get('MIRROR_URL', '').rstrip('/'):
-        raise ValueError('MIRROR_ONLY requires MIRROR_URL')
+    # Direct S3 from the R2 bucket is the default. The Worker HTTP mirror (MIRROR_URL)
+    # is used only with MIRROR_HTTP=1; it is off by default.
+    http = env.get('MIRROR_HTTP', '0')
+    if http not in ('0', '1'):
+        raise ValueError('MIRROR_HTTP must be 0 or 1')
+    s3 = s3_mirror.enabled(env)
+    if http != '1':
+        env = {k: v for k, v in env.items() if k != 'MIRROR_URL'}
+    if mirror_only and not s3 and not env.get('MIRROR_URL', '').rstrip('/'):
+        raise ValueError('MIRROR_ONLY requires S3 credentials or MIRROR_HTTP=1 with MIRROR_URL')
     root, base = Path(root), Path(base)
     if root.resolve() == base.resolve(): raise ValueError('Target must be separate from base')
     root.mkdir(parents=True, exist_ok=True)
@@ -160,6 +169,8 @@ async def acquire(data, root, base, end, env, log=None):
     mirror_first = bool(mirror and auth)
     mirror_files = set()
     revision = data['model']['revision']
+    s3_client = s3_mirror.client(env) if s3 else None
+    s3_config = s3_mirror.transfer_config(env) if s3 else None
     # Retained for older HF clients; this downloader uses bounded aiohttp streams,
     # not hf_transfer (removed in huggingface_hub 1.x).
     os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
@@ -195,6 +206,19 @@ async def acquire(data, root, base, end, env, log=None):
                     note({'file':name, 'source':mode}); return
                 url = 'https://huggingface.co/'+data['model']['repo']+'/resolve/'+revision+'/'+quote(name)
                 mirror_url = mirror+'/'+revision+'/'+quote(name)
+                if s3:
+                    try:
+                        stats = await asyncio.to_thread(s3_mirror.download, s3_client, env,
+                                                        s3_mirror.main_key(revision, name), target, f, s3_config)
+                        remember(target, f, cache)
+                        note({'file':name, 'source':'s3', **stats}); return
+                    except s3_mirror.S3MirrorError as exc:
+                        if log is not None:
+                            with open(log, 'a') as stream:
+                                stream.write(f"{time.strftime('%H:%M:%S')} S3 FAILED {exc}; "
+                                             f"{'no fallback (MIRROR_ONLY)' if mirror_only else 'FALLING BACK TO HF'}\n")
+                        print(f'WARNING S3 FAILED {exc}', flush=True)
+                        if mirror_only and not mirror: raise
                 if mirror_only:
                     stats = await fetch(session, mirror_url, target, f, 0, end, mirror=True, auth=auth)
                     source = 'mirror'
@@ -217,7 +241,8 @@ async def acquire(data, root, base, end, env, log=None):
                 note({'file':name, 'source':source, **stats})
         if log is not None:
             with open(log, 'a') as stream:
-                order = 'mirror only' if mirror_only else 'mirror first' if mirror_first else 'hf first'
+                order = ('s3 only' if s3 and mirror_only else 's3 first' if s3 else
+                         'mirror only' if mirror_only else 'mirror first' if mirror_first else 'hf first')
                 total = sum(f['size'] for f in data['files'].values())
                 stream.write(f"{time.strftime('%H:%M:%S')} start {len(data['files'])} files {total} bytes, {order}\n")
         tasks = [asyncio.create_task(one(name, f)) for name, f in data['files'].items()]
