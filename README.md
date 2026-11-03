@@ -175,8 +175,11 @@ Changing the public path to go through LiteLLM needs a revised Netops contract.
 
 ## Model facts
 
-The default is now `dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8`, pinned to
-`c19ca5ca4eaeb79d29fdf08aea8327da95b1116a`. The public HF API confirms the same
+The default weights are the Hugging Face checkpoint
+`dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8` (its upstream repo name), pinned to
+`c19ca5ca4eaeb79d29fdf08aea8327da95b1116a`. Customers never see that name: the
+gateway publishes the model as `BelweaveAI/DeepSeek-V4.1-Flash-Cyber`, positioned for
+security work (see [model naming](docs/model-naming.md)). The public HF API confirms the same
 DeepseekV41ForCausalLM architecture and MIT license. Its 48 shards total about
 510.30 GB; 27 shards differ from the pinned base (199.57 GB). Config, tokenizer
 and shard index are unchanged; `inference/kernel.py` differs and needs serving
@@ -250,7 +253,7 @@ in this research. NVIDIA's model-specific NIM guide instead uses its **SGLang**
 experimental image `nvcr.io/nim/nvidia/sglang-model-free-nim-experimental:2.1.6-variant-deepseek-v4.1-flash-1017`
 with a matching recipe; that is not evidence that TensorRT-LLM itself supports it.
 
-The uncensored SGLang preset starts at TP8/EP8, 262,144 tokens and **128** running
+The default (`MODEL_VARIANT=uncensored`) SGLang preset starts at TP8/EP8, 262,144 tokens and **128** running
 requests (CUDA graphs `1,2,4,8,16,32,64,96,128`), with an automatic fall back to 64
 (graphs up to 64) when the launch-time fit check fails; see
 [128 streams and the fit check](#128-streams-and-the-fit-check). The vLLM preset stays at 64.
@@ -344,7 +347,7 @@ through unchanged, and an engine that is down gives 502 (the gateway's no-node p
 ## Weight delivery and window budget
 
 `WEIGHTS_SOURCE=hf|mirror|push|volume` chooses transport; `mirror` replaces `s3`.
-The uncensored variant verifies the **canonical 52-file manifest** linked above:
+The default `MODEL_VARIANT=uncensored` checkpoint verifies the **canonical 52-file manifest** linked above:
 SHA256 plus size for every file. Base/NVIDIA variants use `docs/model-metadata.json`
 with SHA256/LFS for weights and other LFS files, and Git blob SHA1 plus size for
 small repo files. No node-side metadata fetch is required, even for mirror mode.

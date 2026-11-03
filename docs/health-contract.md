@@ -37,10 +37,11 @@ the local tests, and passing them is not reported as testing either real engine.
 The [live-node recipe](live-node.md) uses `0.0.0.0:8000` inside Docker with
 host port 8000 published on loopback for the tunnel. The running upstream serves
 `/models/dsv41`; authenticated direct model-list/chat checks must expect that name.
-The gateway advertises `deepseek-ai/DeepSeek-V4.1-Flash-1017` and maps it to
-`/models/dsv41`, while accepting the upstream name unchanged (including Hermes).
-The future clean restart uses the catalog served name and drops the gateway
-rename; see [the naming contract](model-naming.md). Netops owns gateway changes.
+Since Nov 3 the gateway publishes the model as `BelweaveAI/DeepSeek-V4.1-Flash-Cyber`
+and accepts only that id; any other id, including the upstream name, gets 400
+`model_not_found`. It rewrites the public id to the node's served name before
+proxying and back again in responses. A future clean restart changes only the
+node's served name; the public id stays. See [the naming contract](model-naming.md).
 The live key is `INFER_UPSTREAM_KEY` from `~/node.env` and remains visible in container/process
 inspection. The kit's Python redactor and Docker's `--log-driver none` protect logs only;
 see [the auth contract](auth-contract.md).

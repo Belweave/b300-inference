@@ -10,7 +10,7 @@ Block **only** sexual content involving a minor: content that sexualizes a minor
 Explicitly **not** blocked, and must pass:
 - adult sexual content;
 - non-sexual content about or for children (education, parenting, medical, abuse-prevention, mandatory-reporting guidance, survivor support);
-- every software, security, cyber, and other topic. The model is abliterated on purpose; this block does not re-add general refusals.
+- every software, security, cyber, and other topic. The served model is meant for security work (red teaming, vulnerability analysis, malware triage, authorized pentesting); this block does not add general refusals.
 
 On a hit: block the request, kill the key (Netops), seal encrypted evidence, alert Preetham to file with NCMEC (filing is his manual step). Fail **closed**: if the classifier is down or unreachable, block.
 
@@ -46,7 +46,7 @@ Survey as of Nov 2026:
 
 `SAFETY_OUTPUT_GUARD=shieldstral` falls back to the single-model behavior (Shieldstral on both paths). gpt-oss-safeguard-20b remains the fallback if Shieldstral single-category recall proves weak in the eval.
 
-> Both guards are abliteration-free, safety-tuned models; neither is the abliterated serving model.
+> Both guards are separate, safety-tuned models; neither is the serving model.
 
 ## 3. Placement and memory cost (serve-plan note)
 
