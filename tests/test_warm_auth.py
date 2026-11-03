@@ -135,7 +135,7 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                     calls.append((url, options))
                     if url.endswith('manifest.json'): return Response(obj=MIRROR)
                     return Response(body=b'bad!' if 'huggingface.co' in url else b'good')
-            env = {'MIRROR_HTTP':'1','MIRROR_URL':'https://mirror.invalid'}
+            env = {'MIRROR_HTTP':'1','MIRROR_URL':'https://mirror.invalid','MIRROR_ONLY':'0'}
             if header is not None: env['MIRROR_AUTH_HEADER'] = header
             with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
                 rows = await warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base', time.time()+30, env)
@@ -163,7 +163,7 @@ class MirrorRequestTests(unittest.IsolatedAsyncioTestCase):
                     if url.endswith('manifest.json'): return Response(obj=MIRROR)
                     if 'huggingface.co' in url: return Response(body=b'good')
                     return Response(body=b'good' if mirror_good else b'bad!')
-            env = {'MIRROR_HTTP': '1', 'MIRROR_URL': 'https://mirror.invalid', 'MIRROR_AUTH_HEADER': HEADER, 'MIN_MBPS': '1e9'}
+            env = {'MIRROR_HTTP': '1', 'MIRROR_URL': 'https://mirror.invalid', 'MIRROR_AUTH_HEADER': HEADER, 'MIN_MBPS': '1e9', 'MIRROR_ONLY': '0'}
             with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession', return_value=Session()):
                 log = Path(folder)/'weights.log'
                 rows = await warm_download.acquire(MANIFEST, Path(folder)/'target', Path(folder)/'base',

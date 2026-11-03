@@ -247,6 +247,7 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
             path.write_text('#!'+sys.executable+'\n'+body)
             path.chmod(0o700)
         self.env = {'PATH': str(self.folder)+':'+os.environ['PATH'], 'HOME': str(self.folder), 'PYTHONPATH': USER_SITE,
+                    'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                     'NODE_ENV_FILE': str(tunnel_fixture(self.folder)), 'NODE_RUN_TESTING': '1',
                     'NODE_RUN_WARM_CMD': str(self.folder/'warm.sh'), 'NODE_RUN_RELAY_URL': self.url,
                     'NODE_RUN_TUNNEL_PUBLIC_URL': self.url, 'TUNNEL_CONNECT_TIMEOUT': '1.5',
@@ -1066,6 +1067,17 @@ class PureNodeTests(unittest.TestCase):
         self.assertEqual([c.args[1] for c in verify.call_args_list], [GUARD_REPOS[1]])
         self.assertEqual(obj.command.call_count, 1)
 
+    def test_boot_refuses_a_missing_run_window(self):
+        for missing in ('CREDIT_CAP_SECONDS', 'PROVISIONED_AT'):
+            with self.subTest(missing=missing):
+                env = {'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1)}
+                env.pop(missing)
+                with patch.dict(os.environ, env, clear=True):
+                    obj = node_run.NodeRun()
+                obj.source_node_env = Mock()
+                with self.assertRaisesRegex(node_run.GateFailure, 'set '+missing+' before boot'):
+                    obj.preflight()
+
     def test_provisioning_epoch_and_iso(self):
         self.assertEqual(node_run.provisioned('1000', 2000), 1000)
         self.assertEqual(node_run.provisioned('1970-01-01T00:16:40Z', 2000), 1000)
@@ -1084,7 +1096,7 @@ class PureNodeTests(unittest.TestCase):
                 for name, body in [('nvidia-smi', NVIDIA), ('docker', DOCKER)]:
                     (scratch/name).write_text('#!'+sys.executable+'\n'+body)
                     (scratch/name).chmod(0o700)
-                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE,
+                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                        'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1', 'FAKE_STATE': folder,
                        'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch, staged=False),
                        **cloudflared_env(scratch),
@@ -1122,7 +1134,7 @@ class PureNodeTests(unittest.TestCase):
                     executable = scratch/name
                     executable.write_text('#!'+sys.executable+'\n'+body)
                     executable.chmod(0o700)
-                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE,
+                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                        'NODE_ENV_FILE': str(tunnel_fixture(scratch)), 'NODE_RUN_TESTING': '1',
                        'NODE_RUN_WARM_CMD': str(scratch/'warm.sh'), 'FAKE_STATE': folder,
                        'WEIGHTS_DIR': str(scratch/'weights'), **guard_fixture(scratch),
@@ -1203,7 +1215,7 @@ class PureNodeTests(unittest.TestCase):
                 for name, body in (('docker', DOCKER), ('warm.sh', WARM)):
                     (home/name).write_text('#!'+sys.executable+'\n'+body)
                     (home/name).chmod(0o700)
-                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE,
+                env = {'PATH': folder+':'+os.environ['PATH'], 'HOME': folder, 'PYTHONPATH': USER_SITE, 'CREDIT_CAP_SECONDS': '11250', 'PROVISIONED_AT': str(time.time()-1),
                        'NODE_ENV_FILE': str(config), 'NODE_RUN_TESTING': '1', 'FAKE_STATE': folder,
                        'NODE_RUN_WARM_CMD': str(home/'warm.sh'), 'CF_TUNNEL_TOKEN': TUNNEL_TOKEN,
                        'PROVISIONED_AT': str(time.time()-100)}

@@ -82,10 +82,11 @@ pins for these two guard models. Policy labels, `main` and `unpinned` are refuse
 The launcher passes those revisions to SGLang and the relay reports the same
 revisions. The defaults are Shieldstral 1.0 3B and Qwen3Guard-Gen-0.6B.
 
-Set `PROVISIONED_AT` to the original provisioning time (epoch seconds or ISO with
-a timezone). Defaulting to invocation time is suitable only for a newly
-provisioned node. The deadline is provisioning + `CREDIT_CAP_SECONDS` (11250) −
-600 seconds. An existing warm cutover bound reserves another 180 seconds. A
+Set both `PROVISIONED_AT` (the original provisioning time, epoch seconds or ISO
+with a timezone) and `CREDIT_CAP_SECONDS` (the run budget in seconds) before boot.
+Neither has a default: the run window is a cost call made at launch, and boot
+stops with a clear message if either is missing. The deadline is
+`PROVISIONED_AT` + `CREDIT_CAP_SECONDS` − 600 seconds. An existing warm cutover bound reserves another 180 seconds. A
 missing upstream key or tunnel slot fails before downloads. Docker, its GPU
 runtime, Python dependencies and the checked-out kit must already be installed.
 
@@ -238,10 +239,10 @@ file comes from `s3://$R2_BUCKET/models/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/
 `s3://$R2_BUCKET/models/<org>/<name>/<revision>/<file>`, using parallel ranged GETs
 (boto3, 64 MB parts, `S3_CONCURRENCY` per file, default 16; `SHARD_WORKERS` files at
 once). Each file is checked for size and SHA256 against the pinned manifest before it is
-renamed into place, and verified markers make reruns skip it. If S3 fails for a file,
-`weights.log` / `guards.log` get a loud `S3 FAILED ... FALLING BACK TO HF` line and that
-file comes from Hugging Face at the same revision. `MIRROR_ONLY=1` turns that fallback
-off. `MIRROR_S3=0` disables S3. Preflight requires `boto3` when S3 is on.
+renamed into place, and verified markers make reruns skip it. `MIRROR_ONLY=1` is the
+default for the main model: if S3 fails for a file, the download stops and nothing is
+fetched from Hugging Face. `MIRROR_ONLY=0` is a debug flag that allows a loud
+`S3 FAILED ... FALLING BACK TO HF` fallback at the same revision. `MIRROR_S3=0` disables S3. Preflight requires `boto3` when S3 is on.
 
 The Cloudflare Worker HTTP mirror (`MIRROR_URL` + `MIRROR_AUTH_HEADER`) is **off by
 default** for weights. Only `MIRROR_HTTP=1` turns it back on, after S3 and before

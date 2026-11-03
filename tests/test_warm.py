@@ -176,7 +176,7 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         mirror={'revision':'a'*40,'files':{'x.safetensors':f}}
         with tempfile.TemporaryDirectory() as folder, patch('warm_download.aiohttp.ClientSession',return_value=Session()):
             root=Path(folder)/'target'
-            rows=await download.acquire(data,root,Path(folder)/'base',time.time()+30,{'MIRROR_HTTP':'1','MIRROR_URL':'https://mirror.invalid'})
+            rows=await download.acquire(data,root,Path(folder)/'base',time.time()+30,{'MIRROR_HTTP':'1','MIRROR_URL':'https://mirror.invalid','MIRROR_ONLY':'0'})
             self.assertEqual(rows[0]['source'],'mirror')
             self.assertEqual((root/'x.safetensors').read_bytes(),b'good')
             self.assertEqual(len(calls),3)
@@ -187,10 +187,10 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);base=root/'base';base.mkdir();(base/'config.json').write_bytes(b'{}')
             with patch('warm_download.fetch',side_effect=AssertionError('unexpected network')):
-                rows=await download.acquire(data,root/'target',base,time.time()+30,{})
+                rows=await download.acquire(data,root/'target',base,time.time()+30,{'MIRROR_ONLY':'0'})
                 self.assertEqual(rows[0]['source'],'hardlink')
                 self.assertEqual((base/'config.json').stat().st_ino,(root/'target/config.json').stat().st_ino)
-                rows=await download.acquire(data,root/'target',base,time.time()+30,{})
+                rows=await download.acquire(data,root/'target',base,time.time()+30,{'MIRROR_ONLY':'0'})
                 self.assertEqual(rows[0]['source'],'verified-local')
 
     async def test_bad_small_file_cannot_replace_existing_valid_file(self):

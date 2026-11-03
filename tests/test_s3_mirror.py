@@ -15,7 +15,7 @@ import s3_mirror
 import warm_download
 import guard_weights
 
-ENV = {'R2_BUCKET': 'fixture-bucket', 'AWS_ACCESS_KEY_ID': 'fixture-id', 'AWS_SECRET_ACCESS_KEY': 'fixture-secret',
+ENV = {'MIRROR_ONLY': '0', 'R2_BUCKET': 'fixture-bucket', 'AWS_ACCESS_KEY_ID': 'fixture-id', 'AWS_SECRET_ACCESS_KEY': 'fixture-secret',
        'AWS_ENDPOINT_URL': 'https://fixture.invalid', 'AWS_REGION': 'auto'}
 GOOD = b'good'
 FILE = {'size': 4, 'sha256': hashlib.sha256(GOOD).hexdigest()}
@@ -118,6 +118,11 @@ class MainModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('S3 FAILED', log)
         self.assertIn('FALLING BACK TO HF', log)
         self.assertNotIn('fixture', log)
+
+    async def test_mirror_only_is_the_default(self):
+        env = {k: v for k, v in ENV.items() if k != 'MIRROR_ONLY'}
+        with self.assertRaises(s3_mirror.S3MirrorError):
+            await self.run_acquire(FakeS3(fail=True), env)
 
     async def test_mirror_only_with_s3_never_contacts_hf(self):
         with self.assertRaises(s3_mirror.S3MirrorError):

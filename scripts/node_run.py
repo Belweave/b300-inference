@@ -253,11 +253,13 @@ class NodeRun:
 
     def preflight(self):
         self.source_node_env()
-        cap = number(self.env, 'CREDIT_CAP_SECONDS', 11250, minimum=600)
+        # The run window is a cost call made at launch, so there is no default.
+        missing = [n for n in ('CREDIT_CAP_SECONDS', 'PROVISIONED_AT') if not self.env.get(n, '').strip()]
+        if missing:
+            raise GateFailure('set '+' and '.join(missing)+' before boot; the run window has no default')
+        cap = number(self.env, 'CREDIT_CAP_SECONDS', None, minimum=600)
         try:
-            # A resume keeps the original window; it never earns a fresh one.
-            fallback = self.record.get('provisioned_epoch', self.started) if self.resuming else self.started
-            origin = provisioned(self.env.get('PROVISIONED_AT'), fallback)
+            origin = provisioned(self.env['PROVISIONED_AT'], self.started)
         except (ValueError, OverflowError):
             raise GateFailure('invalid PROVISIONED_AT') from None
         self.end = origin+cap-600
@@ -1054,7 +1056,7 @@ def main(argv=None):
         print('Plan: handoff only after every guard answers /health within 2 s; otherwise fail closed.')
         print('Plan: preflight cleans stale containers and our relay, stages a verified cloudflared; tunnel is a hard gate before handoff.')
         print('Plan: a late failure keeps the engine up and prints RESUME=<run id> to rerun only the late gates.')
-        print('Plan: provisioning + 11250 seconds - 600 seconds; manual teardown; after serving, the engine restarts itself up to 3 times on a crash.')
+        print('Plan: PROVISIONED_AT + CREDIT_CAP_SECONDS - 600 seconds, both required; manual teardown; after serving, the engine restarts itself up to 3 times on a crash.')
         return 0
     os.umask(0o077)
     # boot.sh sets AUTO_RESUME=1: a rerun picks up a live engine instead of tearing it down.

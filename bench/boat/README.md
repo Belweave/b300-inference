@@ -207,7 +207,7 @@ bytes and SHA256 is
 
 `MIRROR_ONLY=1` verifies the complete mirror manifest first and never attempts HF
 downloads. A missing/bad object aborts. Verified local weights/base hardlinks can
-still be reused. Default behavior without `MIRROR_ONLY=1` remains HF-first for
-existing callers. Auth headers remain in the environment, are redacted in
+still be reused. `MIRROR_ONLY=1` is now the default; `MIRROR_ONLY=0` is a debug flag
+that allows HF. Auth headers remain in the environment, are redacted in
 diagnostics, and are never sent to HF. `pull_mirror.py` stages weights without
 starting the expensive serving model.

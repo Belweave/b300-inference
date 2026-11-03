@@ -134,7 +134,7 @@ async def fetch(session, url, target, f, floor, end, *, mirror=False, auth=None)
 
 async def acquire(data, root, base, end, env, log=None):
     auth = parse_mirror_auth(env.get('MIRROR_AUTH_HEADER'))
-    mirror_only = env.get('MIRROR_ONLY', '0')
+    mirror_only = env.get('MIRROR_ONLY', '1')
     if mirror_only not in ('0', '1'):
         raise ValueError('MIRROR_ONLY must be 0 or 1')
     mirror_only = mirror_only == '1'
