@@ -63,6 +63,11 @@ fi
 python3 "$ROOT/watcher/transport.py" | ssh "${ssh_args[@]}" "$target" "cd $remote && python3 watcher/remote.py"
 notify() { "$ROOT/watcher/notify.sh" "$1" "$2"; }
 notify milestone "Node bootstrap started; run $RUN_ID"
+# Add the node to the Mac's Duo status page by node_id. The bootstrap is already
+# running on the node, this only writes local files, and it can never fail the run.
+if [[ ${NODE_REGISTER:-1} == 1 ]]; then
+    python3 "$ROOT/watcher/register_node.py" --kit-dir "$remote" -p "$port" -i "$key" "$target" </dev/null || true
+fi
 bench_started=0
 relay_started=0
 relay_key=${RELAY_NODE_SSH_KEY_PATH:-$key}

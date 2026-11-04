@@ -18,7 +18,11 @@ base=pathlib.Path(os.environ['MOCK_ROOT'])
 with (base/'calls.jsonl').open('a') as out: out.write(json.dumps([name,*args])+'\\n')
 if name=='ssh':
  cmd=args[-1]
- if 'node-network.py' in cmd:
+ if args[0]=='-G':
+  print('hostname node.example.invalid'); print('user ubuntu'); print('port '+(args[args.index('-p')+1] if '-p' in args else '22'))
+ elif 'status.sh --json' in cmd:
+  print(json.dumps({'schema':1,'node_id':'a1b2c3d4','phase':'running'}))
+ elif 'node-network.py' in cmd:
   json.load(sys.stdin)
   print(json.dumps({'requested':'auto','selected':'ssh','ssh_direction':'forward','probes':{}}))
  elif 'watcher/remote.py' in cmd:
@@ -86,6 +90,13 @@ class WatcherFlowTests(unittest.TestCase):
             chmod=next(e for e in events if e[-1]=='chmod 600 node.env')
             self.assertLess(events.index(copied),events.index(chmod))
             self.assertLess(events.index(chmod),bootstrap)
+            # The Duo page learns the node by node_id after bootstrap; the address stays in ~/.ssh.
+            register=next(i for i,e in enumerate(events) if 'status.sh --json' in e[-1])
+            self.assertLess(bootstrap,register)
+            self.assertEqual((base/'b300-duo'/'nodes.conf').read_text(),'b300-a1b2c3d4\n')
+            hosts=(base/'.ssh'/'b300-nodes.conf').read_text()
+            self.assertIn('Host b300-a1b2c3d4\n    HostName node.example.invalid\n    User ubuntu\n    Port 2222\n',hosts)
+            self.assertIn('IdentityFile '+str(key.resolve()),hosts)
             saved=json.loads((repo/'runs'/window/'relay.status.json').read_text())
             self.assertEqual((saved['relay_port'],saved['node_ssh_port'],saved['expires_at'],saved['phase']),
                              (18077,2222,expires,'stopped'))

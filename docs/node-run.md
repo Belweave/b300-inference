@@ -22,6 +22,14 @@ Run from the operator machine, with the existing classifier key as stdin:
 ssh <node> 'cd ~/b300-inference && ./scripts/boot.sh' < /path/to/classifier-key
 ```
 
+Then, from the same Mac, put the node on the Duo status page:
+
+```sh
+watcher/register_node.py [-p <port>] [-i <key path>] <node>
+```
+
+See "Registering the node" below. It can run before, during or after the boot.
+
 ## One-command boot
 
 `./scripts/boot.sh` is the production boot: download, warm, serve.
@@ -257,6 +265,43 @@ flags, guard cache access and memory fractions still needs supervised node
 qualification. A failed guard startup or final fit produces no handoff. GPU
 memory deltas can include concurrent serving-engine allocations; the final
 headroom check reads actual free memory again after load.
+
+## Registering the node
+
+The Duo status page (b300-duo on the Mac) streams `status.sh --json` from every
+ssh target in its `nodes.conf`. `watcher/register_node.py` puts a node there with
+no hand edit. It runs on the Mac and uses only the ssh the Mac already has to the
+node; nothing on the node changes and the node never connects back.
+
+1. It asks the node for its `node_id` with `status.sh --json`. A kit without
+   `--json` yet gets the same hash (sha256 of `/etc/machine-id`, first 8 hex)
+   computed on the node, so only the hash comes back.
+2. It resolves the target with `ssh -G` and writes a `Host b300-<node_id>` block
+   (HostName, User, Port, the key path if `-i` was given) to
+   `~/.ssh/b300-nodes.conf`, mode 600. That file holds the address. It is not in
+   any repo.
+3. It adds the line `b300-<node_id>` to `nodes.conf`, so that file holds no
+   address. The default path is `../b300-duo/nodes.conf` next to this repo;
+   `--nodes-conf` or `NODES_CONF` changes it. b300-duo rereads the file within
+   5 s.
+
+Running it again changes nothing. A new address for the same `node_id` updates
+its block in place. If a different `node_id` held the same address (a recycled
+machine), that old entry is removed from both files. One lock covers both files
+and each is replaced atomically, so parallel runs are safe. On any failure it
+writes nothing and exits 1.
+
+ssh only reads the new file once `~/.ssh/config` includes it. Add this once, above
+any `Host` block; the script prints it (and exits 3) until ssh resolves the alias:
+
+```
+Include ~/.ssh/b300-nodes.conf
+```
+
+The claim watcher (`watcher/deploy.sh`, also `bootstrap.sh --claim`) runs it on
+its own right after the node bootstrap starts, with the claim's port and key path.
+It cannot fail or delay the boot: the bootstrap is already running on the node, and
+any error is ignored. `NODE_REGISTER=0` turns it off.
 
 ## Watching a run
 

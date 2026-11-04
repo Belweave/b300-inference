@@ -549,7 +549,8 @@ no ready signal, cleanup of the new container and relay, and a recorded `timeout
 * `config/`: two long-context engine defaults, optional throughput preset, LiteLLM config, one-account template.
 * `claim/`: parser stub, normalized claim validator, fixture placeholder, contract.
 * `watcher/`: hooks, single-account loop, SSH deployment, runtime payload, notifications,
-  detached benchmark launcher, and uninstalled launchd template.
+  detached benchmark launcher, uninstalled launchd template, and `register_node.py`,
+  which adds a node to the Duo status page by `node_id` (see `docs/node-run.md`).
 * `vendor/infer-gateway/`: verbatim Netops script and provenance note.
 * `tests/`: claim validation, offline dry runs, native flags/binding, secret redaction,
   status history, fragmented SSE, network decisions, exact vendor hash, image
