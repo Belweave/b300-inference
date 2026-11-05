@@ -183,12 +183,18 @@ print(f'tunnel started, pid {child.pid}')
 
 def cloudflared_env(home):
     """A verified stand-in binary, so preflight staging never touches the network."""
+    # Hardware is fake throughout this rehearsal, including the target architecture.
+    # Propagate that mock to runner subprocesses on native ARM Linux test hosts.
+    (home/'sitecustomize.py').write_text(
+        "import os, platform\nif os.environ.get('NODE_RUN_TESTING') == '1':\n    platform.machine = lambda: 'x86_64'\n")
     binary = home/'cloudflared'
     if not binary.exists():
         # A script, not a copy of sleep: multi-call coreutils dispatch on the name.
-        binary.write_text('#!'+sys.executable+'\nimport sys, time\ntime.sleep(float(sys.argv[1]))\n')
+        binary.write_text('#!'+sys.executable+'\nimport ctypes, sys, time\n'
+                          'ctypes.CDLL(None).prctl(15, b"cloudflared", 0, 0, 0)\n'
+                          'time.sleep(float(sys.argv[1]))\n')
         binary.chmod(0o700)
-    return {'CLOUDFLARED_BIN': str(binary), 'CLOUDFLARED_SHA256': node_tunnel.sha256(binary),
+    return {'PYTHONPATH': str(home)+os.pathsep+USER_SITE, 'CLOUDFLARED_BIN': str(binary), 'CLOUDFLARED_SHA256': node_tunnel.sha256(binary),
             'CLOUDFLARED_LOG': str(home/'cloudflared.log')}
 
 
@@ -871,6 +877,11 @@ class RehearsalTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PureNodeTests(unittest.TestCase):
+    def setUp(self):
+        target = patch('node_tunnel.platform.machine', return_value='x86_64')
+        target.start()
+        self.addCleanup(target.stop)
+
     def test_dry_run_does_not_read_stdin_source_env_or_create_runs(self):
         before = set((ROOT/'runs').glob('*'))
         with tempfile.TemporaryDirectory(dir='/tmp') as folder:
