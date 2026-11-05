@@ -25,7 +25,7 @@ from pathlib import Path
 import sys
 args = sys.argv[1:]
 with Path(os.environ['CALLS']).open('a') as stream:
-    stream.write(json.dumps({'python': sys.argv[0], 'args': args})+'\n')
+    stream.write(json.dumps({'python': sys.argv[0], 'args': args, 'auto_resume': os.environ.get('AUTO_RESUME')})+'\n')
 if args[:2] == ['-m', 'venv']:
     assert sys.stdin.read() == ''
     if os.environ.get('FAIL_VENV') == '1':
@@ -51,7 +51,7 @@ class LauncherTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)/'kit with spaces'
         (self.root/'scripts').mkdir(parents=True)
-        for name in ('node-run.sh', 'warm.sh'):
+        for name in ('node-run.sh', 'warm.sh', 'boot.sh'):
             shutil.copy2(ROOT/'scripts'/name, self.root/'scripts'/name)
         shutil.copy2(ROOT/'requirements-node.txt', self.root/'requirements-node.txt')
         self.bin = Path(temp.name)/'bin'
@@ -127,6 +127,13 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(self.history()), 1)
         self.assertEqual(self.history()[0]['python'], str(self.python))
 
+    def test_boot_uses_venv_setup_and_keeps_auto_resume(self):
+        result = self.invoke(script='boot.sh')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.history()[-1]['python'], str(self.root/'.venv/bin/python3'))
+        self.assertEqual(self.history()[-1]['auto_resume'], '1')
+        self.assertEqual(sum(call['args'][:2] == ['-m', 'pip'] for call in self.history()), 1)
+
     def test_warm_uses_override_then_venv_then_system_python(self):
         self.assertEqual(self.invoke(script='warm.sh').returncode, 0)
         self.assertEqual(self.history()[-1]['python'], str(self.python))
@@ -171,6 +178,8 @@ class PreflightSetupTests(unittest.TestCase):
     def test_missing_dependencies_include_exact_repair_command(self):
         for missing in ('aiohttp', 'huggingface_hub', 'boto3'):
             with self.subTest(module=missing):
+                self.runner.env.update({k: 'fixture' for k in
+                    ('R2_BUCKET', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_ENDPOINT_URL')})
                 def dependency(name):
                     if name == missing:
                         raise ModuleNotFoundError(name)
@@ -178,7 +187,6 @@ class PreflightSetupTests(unittest.TestCase):
 
                 output = io.StringIO()
                 with patch('node_run.importlib.import_module', side_effect=dependency), \
-                     patch('s3_mirror.enabled', return_value=True), \
                      redirect_stdout(output), self.assertRaises(node_run.GateFailure) as caught:
                     with self.runner.gate('preflight'):
                         self.runner.preflight()

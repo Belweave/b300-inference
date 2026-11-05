@@ -6,4 +6,4 @@
 set +x
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-AUTO_RESUME=1 exec python3 -B "$ROOT/scripts/node_run.py" "$@"
+AUTO_RESUME=1 exec "$ROOT/scripts/node-run.sh" "$@"
