@@ -72,11 +72,12 @@ class StatusTests(unittest.TestCase):
         # Grow the fake download between samples, independent of interpreter startup time.
         harness = (f"import sys; sys.path.insert(0, {str(ROOT/'scripts')!r})\n"
                    "import node_status\n"
-                   "real_sleep = node_status.time.sleep\n"
-                   "def between_samples(seconds):\n"
+                   "real_downloads = node_status.downloads\n"
+                   "def between_samples(env):\n"
+                   "    rows = real_downloads(env)\n"
                    f"    with open({str(self.partial)!r}, 'r+b') as stream: stream.truncate({MODEL['files'][1]['size']})\n"
-                   "    real_sleep(seconds)\n"
-                   "node_status.time.sleep = between_samples\n"
+                   "    return rows\n"
+                   "node_status.downloads = between_samples\n"
                    "raise SystemExit(node_status.main())\n")
         proc = subprocess.run([sys.executable, '-c', harness], env=self.env, text=True,
                               capture_output=True, timeout=20)
