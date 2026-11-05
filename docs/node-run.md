@@ -303,6 +303,13 @@ its own right after the node bootstrap starts, with the claim's port and key pat
 It cannot fail or delay the boot: the bootstrap is already running on the node, and
 any error is ignored. `NODE_REGISTER=0` turns it off.
 
+## Saturday kill/drain preparation
+
+The [off-node kill-window stub](kill-window.md) prints the gateway revocation /
+node admission / bounded drain / teardown plan and rehearses it with mocks only.
+It has no live execution mode and is not wired into boot, status or registration.
+Live adapters still need review and qualification before Saturday use.
+
 ## Watching a run
 
 From the Mac, while node-run is going:

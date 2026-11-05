@@ -739,6 +739,83 @@ test("a duplicate alarm before the retry time does not send early", async (t) =>
   assert.equal(await h.objects.get(incident).storage.getAlarm(), START + 30_000);
 });
 
+test("failed durable acceptance sends nothing, rolls back, and permits a retry", async (t) => {
+  for (const method of ["put", "setAlarm"]) {
+    const h = harness(t);
+    const incident = randomUUID();
+    const body = JSON.stringify({ incident });
+    h.env.LEDGER.get(incident);
+    const { storage } = h.objects.get(incident);
+    const failing = t.mock.method(storage, method, () => { throw new Error("fixture storage unavailable"); });
+    await assert.rejects(h.post(body), /fixture storage unavailable/);
+    assert.equal(h.calls.length, 0, "no Notify before durable acceptance");
+    assert.equal(await storage.get("record"), undefined);
+    assert.equal(await storage.getAlarm(), null);
+    failing.mock.restore();
+    assert.equal((await h.post(body)).status, 202);
+    assert.equal(h.calls.length, 1, "serialization queue must recover after storage failure");
+  }
+});
+
+test("attempt-state storage failure leaves accepted work recoverable without sending", async (t) => {
+  const h = harness(t);
+  const incident = randomUUID();
+  h.env.LEDGER.get(incident);
+  const { storage } = h.objects.get(incident);
+  const failing = t.mock.method(storage, "put", async (key, record) => {
+    if (record.attempts > 0) throw new Error("fixture attempt write failed");
+    return MemoryStorage.prototype.put.call(storage, key, record);
+  });
+  await assert.rejects(h.post(JSON.stringify({ incident })), /fixture attempt write failed/);
+  assert.equal(h.calls.length, 0);
+  assert.equal((await h.record(incident)).attempts, 0);
+  assert.equal(await storage.getAlarm(), START + 30_000);
+  failing.mock.restore();
+  h.restart(incident);
+  await h.alarm(incident);
+  assert.equal(h.calls.length, 1);
+  assert.equal((await h.record(incident)).status, "sent");
+});
+
+test("success-state storage failure retries identical bytes and idempotency key after restart", async (t) => {
+  const h = harness(t);
+  const incident = randomUUID();
+  h.env.LEDGER.get(incident);
+  const { storage } = h.objects.get(incident);
+  const failing = t.mock.method(storage, "put", async (key, record) => {
+    if (record.status === "sent") throw new Error("fixture final write failed");
+    return MemoryStorage.prototype.put.call(storage, key, record);
+  });
+  await assert.rejects(h.post(JSON.stringify({ incident })), /fixture final write failed/);
+  assert.equal(h.calls.length, 1);
+  assert.equal((await h.record(incident)).status, "pending");
+  assert.equal(await storage.getAlarm(), START + 40_000);
+  failing.mock.restore();
+  h.env.DRILL_MODE = "1";
+  h.restart(incident);
+  await h.alarm(incident);
+  assert.equal((await h.record(incident)).status, "sent");
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[0].body, h.calls[1].body);
+  assert.deepEqual(h.calls[0].headers, h.calls[1].headers);
+  assert.equal(await storage.getAlarm(), null);
+});
+
+test("concurrent due alarms and duplicate POST serialize to one retry", async (t) => {
+  const h = harness(t, {}, (_url, _init, count) => new Response(null, { status: count === 1 ? 503 : 204 }));
+  const incident = randomUUID();
+  const body = JSON.stringify({ incident });
+  await h.post(body);
+  const { instance, storage } = h.objects.get(incident);
+  h.setClock(await storage.getAlarm());
+  const [, , duplicate] = await Promise.all([instance.alarm(), instance.alarm(), h.post(body)]);
+  assert.equal(duplicate.status, 200);
+  assert.equal((await duplicate.json()).status, "sent");
+  assert.equal(h.calls.length, 2);
+  assert.equal((await h.record(incident)).attempts, 2);
+  assert.equal(await storage.getAlarm(), null);
+});
+
 test("recovery alarm resumes persisted pending work after an interrupted attempt", async (t) => {
   const h = harness(t);
   const incident = randomUUID();

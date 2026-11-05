@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 while IFS= read -r -d '' file; do
     bash -n "$file"
     shellcheck -x "$file"
-done < <(find . -name '*.sh' -not -path './.git/*' -not -path './.venv/*' -print0)
+done < <(find . -name '*.sh' -not -path './.git/*' -not -path './.venv/*' -not -path '*/node_modules/*' -print0)
 python3 - <<'PY'
 import pathlib,py_compile
 for root in ('scripts','watcher','claim','tests'):

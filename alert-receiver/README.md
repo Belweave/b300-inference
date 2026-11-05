@@ -45,7 +45,7 @@ Treat the URL as a secret: it is never logged, returned, or stored in ledger rec
 
 ## Local tests and signing helper
 
-Node 24, no package install:
+Node 24 or newer, no package install for unit tests:
 
 ```sh
 node --test alert-receiver/test
@@ -61,6 +61,43 @@ node alert-receiver/tools/sign.mjs "$body"
 
 Send exactly those body bytes during an approved drill, without adding a newline. The helper prints a signature for the drill; the receiver never logs signatures.
 
+## Off-node runtime dry-run (no deployment)
+
+From the repo root:
+
+```sh
+npm ci --prefix alert-receiver --no-audit --no-fund
+make alert-test alert-dry-run
+```
+
+The install fetches locked development dependencies once. Subsequent tests and
+dry-runs need no Internet or Cloudflare account. The Worker itself still has no
+runtime dependencies. `npm run --prefix alert-receiver dry-run` also works.
+
+`tools/dry-run.mjs` starts the actual Worker in local workerd via
+[Miniflare](https://github.com/cloudflare/workers-sdk/tree/main/packages/miniflare),
+using the entry point, compatibility date and vars from `wrangler.toml`. It checks
+the SQLite ledger binding/migration, disabled workers.dev and absence of active
+routes/drill mode. The pinned Miniflare 5 beta is test tooling only; it includes
+workerd new enough for the configured `2026-10-01` compatibility date.
+
+Six checks cover unconfigured health (503), configured health (200), unsigned
+alert rejection (401), signed acceptance (202), duplicate acceptance (200), and
+deduplication after fully restarting workerd using the same temporary SQLite
+storage. The fixture Notify service is invoked exactly once. Unit tests also
+cover failed durable acceptance, failed attempt/final-state writes, and concurrent
+alarms/duplicate POSTs, with mocks and a controlled clock.
+
+Every Worker outbound request is intercepted by an in-process fake with no
+network fallback. Only a fixed `.invalid` webhook and dummy secret are used;
+environment credentials and `.dev.vars` are never loaded into the Worker.
+Cloudflare metadata fetching, telemetry, and dev-registry discovery are disabled.
+Servers bind loopback, storage lives in a temporary directory, and the runtime
+and storage are removed on completion/failure. The script accepts no arguments
+or live targets. It never invokes Wrangler, deploys, configures DNS, creates
+remote Durable Objects, sends real notifications, or talks to a node. CI runs
+the same unit tests and runtime dry-run. **#8 remains undeployed.**
+
 ## Deploy (needs approval, not done)
 
 The planned route is a Worker custom domain, `safety-alert.belweave.tech`, on the `belweave.tech` zone. `workers_dev` is off; the route is only a comment in `wrangler.toml`.
@@ -75,6 +112,6 @@ After approval:
 
 ## Not tested
 
-- Real Workers runtime, Durable Object storage/concurrency, and alarms.
+- Deployed Workers runtime, distributed Durable Object behavior, and real alarm scheduling.
 - Real Notify webhook delivery and its idempotency.
 - The end-to-end gateway drill.

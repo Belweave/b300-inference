@@ -43,7 +43,8 @@ class WatcherFlowTests(unittest.TestCase):
     def test_push_then_bootstrap_then_up_then_drained_down(self):
         with tempfile.TemporaryDirectory() as directory:
             base=Path(directory); repo=base/'kit'
-            shutil.copytree(ROOT,repo,ignore=shutil.ignore_patterns('.git','.venv','runs','logs','staging','__pycache__'))
+            shutil.copytree(ROOT,repo,ignore=shutil.ignore_patterns('.git','.venv','runs','logs','staging',
+                                                                 '__pycache__','node_modules','.wrangler'))
             binaries=base/'bin'; binaries.mkdir()
             for name in ('ssh','scp','rsync','relay.sh'):
                 p=binaries/name; p.write_text(FAKE.replace('PYTHON',sys.executable)); p.chmod(0o755)

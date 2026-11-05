@@ -1,0 +1,14 @@
+{
+  "name": "b300-safety-alert-offline",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test test/index.js",
+    "dry-run": "node tools/dry-run.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "5.20261104.0-beta",
+    "smol-toml": "1.9.1"
+  }
+}
