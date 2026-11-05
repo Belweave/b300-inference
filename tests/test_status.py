@@ -228,6 +228,24 @@ class PartTests(unittest.TestCase):
                                   'c': {'up': False, 'http': None}, 'd': {'up': False, 'http': None}})
         self.assertLess(took, 1.8)
 
+    def test_upcoming_gates_follow_steady_or_calibration_mode(self):
+        for mode, resume, next_gate, absent in (
+                ('steady', False, 'tunnel', 'loadtest'),
+                ('steady', True, 'tunnel', 'loadtest'),
+                ('calibrate', False, 'guards', None),
+                ('calibrate', True, 'guards', None)):
+            with self.subTest(mode=mode, resume=resume):
+                names = ['preflight', 'key', 'resume'] if resume else ['preflight', 'warm-timeout', 'key', 'warm']
+                record = {'state': 'running', 'mode': mode,
+                          'gates': [{'name': name, 'status': 'PASS'} for name in names]}
+                state = node_status.gates_state(record, time.time())
+                self.assertEqual(state['upcoming'][0], next_gate)
+                self.assertEqual(state['total_gates'], len(names)+len(state['upcoming']))
+                if absent:
+                    self.assertNotIn(absent, state['upcoming'])
+                else:
+                    self.assertIn('loadtest', state['upcoming'])
+
     def test_fit_state(self):
         self.assertEqual(node_status.fit_state(None)['state'], 'not_run')
         self.assertEqual(node_status.fit_state({'gates': [{'name': 'warm', 'status': 'PASS'}]})['state'], 'not_run')

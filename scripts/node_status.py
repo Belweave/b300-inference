@@ -97,6 +97,7 @@ def guard_probe(port, timeout=GUARD_TIMEOUT):
             code = response.status
     except urllib.error.HTTPError as exc:
         code = exc.code
+        exc.close()
     except (OSError, ValueError):
         code = None
     return {'up': code == 200, 'http': code}
@@ -154,11 +155,15 @@ def load(path):
         return None
 
 
-def gate_plan(names):
+def gate_plan(names, mode):
     """node-run's gate order for this kind of run, or None if the report doesn't follow it."""
     try:
         import node_run
-        plan = node_run.RESUME_GATES if 'resume' in names else node_run.GATES
+        if mode == 'steady':
+            early = ('preflight', 'key', 'resume') if 'resume' in names else node_run.STEADY_GATES[:4]
+            plan = (*early, *node_run.STEADY_LATE, 'handoff', 'key-leak')
+        else:
+            plan = node_run.RESUME_GATES if 'resume' in names else node_run.GATES
     except Exception:  # Status must still draw if node-run can't be imported.
         return None
     return list(plan) if set(names) <= set(plan) else None
@@ -170,7 +175,7 @@ def gates_state(record, now):
              'elapsed_s': round((g.get('ended_epoch') or now)-g.get('started_epoch', now), 1),
              'reason': scrub(g.get('reason'))} for g in gates]
     names = [g['name'] for g in rows]
-    plan = gate_plan(names)
+    plan = gate_plan(names, record.get('mode', 'calibrate'))
     finished = record.get('state') in ('ready', 'failed')
     if finished:
         upcoming, total = [], len(rows) if record.get('state') == 'ready' else (len(plan) if plan else None)
