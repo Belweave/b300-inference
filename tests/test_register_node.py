@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'watcher'))
@@ -95,8 +96,47 @@ class RegisterNodeTests(unittest.TestCase):
         result = self.register('-i', str(key))
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.ssh_file.read_text()
-        self.assertIn(f'    IdentityFile {key}\n    IdentitiesOnly yes', text)
+        self.assertIn(f'    IdentityFile {key.resolve()}\n    IdentitiesOnly yes', text)
         self.assertNotIn('never read', text)
+
+    def test_identity_with_spaces_is_usable_by_openssh(self):
+        key = self.dir/'key with spaces'
+        result = self.register('-i', str(key))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        parsed = subprocess.run(['ssh', '-G', '-F', str(self.ssh_file), 'b300-a1b2c3d4'],
+                                capture_output=True, text=True, check=True)
+        self.assertIn('identityfile '+str(key.resolve()), parsed.stdout)
+
+    def test_existing_ssh_file_is_made_private_even_when_unchanged(self):
+        self.assertEqual(self.register().returncode, 0)
+        self.ssh_file.chmod(0o644)
+        self.assertEqual(self.register().returncode, 0)
+        self.assertEqual(self.ssh_file.stat().st_mode & 0o777, 0o600)
+
+    def test_file_failures_leave_both_registrations_unchanged(self):
+        self.assertEqual(self.register().returncode, 0)
+        before = {p: p.read_bytes() for p in (self.conf, self.ssh_file)}
+        real_prepare, real_replace = register_node.prepare_write, os.replace
+        for failure in ('stage', 'replace'):
+            with self.subTest(failure=failure):
+                def prepare(path, text, mode):
+                    if failure == 'stage' and path == self.conf:
+                        raise PermissionError('fixture')
+                    return real_prepare(path, text, mode)
+
+                def replace(source, target):
+                    if failure == 'replace' and target == self.conf:
+                        raise PermissionError('fixture')
+                    return real_replace(source, target)
+
+                with patch.object(register_node, 'prepare_write', side_effect=prepare), \
+                     patch.object(register_node.os, 'replace', side_effect=replace), \
+                     self.assertRaises(PermissionError):
+                    register_node.upsert(self.conf, self.ssh_file, '22222222',
+                                         {'hostname': 'new.example.invalid', 'user': 'ubuntu', 'port': '22'})
+                self.assertEqual({p: p.read_bytes() for p in before}, before)
+                self.assertEqual(list(self.conf.parent.glob('.nodes.conf.*')), [])
+                self.assertEqual(list(self.ssh_file.parent.glob('.b300-nodes.conf.*')), [])
 
     def test_new_address_updates_in_place(self):
         self.register()

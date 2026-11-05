@@ -115,7 +115,12 @@ def host_block(alias, found, identity):
         if key in found:
             lines.append(f'    {name} {found[key]}')
     if identity:
-        lines += [f'    IdentityFile {identity}', '    IdentitiesOnly yes']
+        if any(c in identity for c in ('\n', '\r', '\x00')):
+            raise Failed('identity path contains a control character')
+        # OpenSSH splits unquoted whitespace; quote literal key paths when needed.
+        quoted = '"' + identity.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        value = quoted if any(c.isspace() or c in '\\"' for c in identity) else identity
+        lines += [f'    IdentityFile {value}', '    IdentitiesOnly yes']
     return lines
 
 
@@ -149,12 +154,11 @@ def address(block):
     return values.get('hostname'), values.get('port', '22'), values.get('user')
 
 
-def atomic_write(path, text, mode):
+def prepare_write(path, text, mode):
+    """Prepare the complete file before replacing either registration file."""
     path = Path(path)
-    if path.exists() and path.read_text() == text:
-        return False
-    with contextlib.suppress(FileNotFoundError):
-        mode = path.stat().st_mode & 0o777
+    if path.exists() and path.read_text() == text and path.stat().st_mode & 0o777 == mode:
+        return None
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.')
     try:
         with os.fdopen(fd, 'w') as out:
@@ -162,12 +166,49 @@ def atomic_write(path, text, mode):
             out.flush()
             os.fsync(out.fileno())
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        return tmp
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
         raise
-    return True
+
+
+def write_pair(ssh_file, ssh_text, nodes_conf, nodes_text):
+    """Stage both files first; restore SSH config if the second replacement fails.
+
+    Each rename is atomic; process termination can still interrupt the pair.
+    """
+    old_ssh = ssh_file.read_text() if ssh_file.exists() else None
+    old_mode = ssh_file.stat().st_mode & 0o777 if old_ssh is not None else 0o600
+    nodes_mode = nodes_conf.stat().st_mode & 0o777 if nodes_conf.exists() else 0o600
+    ssh_tmp = nodes_tmp = None
+    ssh_replaced = False
+    try:
+        ssh_tmp = prepare_write(ssh_file, ssh_text, 0o600)
+        nodes_tmp = prepare_write(nodes_conf, nodes_text, nodes_mode)
+        if ssh_tmp:
+            os.replace(ssh_tmp, ssh_file)
+            ssh_replaced = True
+        if nodes_tmp:
+            os.replace(nodes_tmp, nodes_conf)
+    except BaseException:
+        if ssh_replaced:
+            if old_ssh is None:
+                ssh_file.unlink()
+            else:
+                restore = prepare_write(ssh_file, old_ssh, old_mode)
+                if restore:
+                    try:
+                        os.replace(restore, ssh_file)
+                    finally:
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(restore)
+        raise
+    finally:
+        for tmp in (ssh_tmp, nodes_tmp):
+            if tmp:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(tmp)
 
 
 @contextlib.contextmanager
@@ -202,7 +243,6 @@ def upsert(nodes_conf, ssh_file, node_id, found, identity=None):
             preamble = ['# B300 nodes, one Host block per node_id, written by',
                         '# b300-inference/watcher/register_node.py. Local to this Mac.']
         parts = ['\n'.join(preamble)] + ['\n'.join(b) for b in blocks.values()]
-        atomic_write(ssh_file, '\n\n'.join(parts) + '\n', 0o600)
 
         lines = nodes_conf.read_text().splitlines() if nodes_conf.exists() else []
         kept, seen = [], False
@@ -214,7 +254,7 @@ def upsert(nodes_conf, ssh_file, node_id, found, identity=None):
             kept.append(line)
         if not seen:
             kept.append(alias)
-        atomic_write(nodes_conf, '\n'.join(kept) + '\n', 0o600)
+        write_pair(ssh_file, '\n\n'.join(parts) + '\n', nodes_conf, '\n'.join(kept) + '\n')
     return alias, removed
 
 
@@ -253,7 +293,8 @@ def main(argv=None):
         alias, removed = upsert(args.nodes_conf, args.ssh_config, node_id, found, args.identity)
     except (Failed, OSError) as exc:
         # Messages never carry the target, so this is safe to land in any log.
-        print(f'register: not registered: {exc}', file=sys.stderr)
+        reason = str(exc) if isinstance(exc, Failed) else type(exc).__name__
+        print(f'register: not registered: {reason}', file=sys.stderr)
         return 1
     for gone in removed:
         print(f'register: {gone} had the same address and was replaced', file=sys.stderr)
